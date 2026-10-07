@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import io
+import logging
 import re
+import time
 import xml.etree.ElementTree as ET
-from urllib.parse import quote, urldefrag, urljoin, urlsplit, urlunsplit
+from collections import Counter
+from pathlib import PurePosixPath
+from urllib.parse import quote, unquote, urldefrag, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
+
+log = logging.getLogger(__name__)
 
 _DROP_TAGS = [
     "script", "style", "noscript", "nav", "header", "footer", "aside",
@@ -124,3 +131,90 @@ def extract_document(
             continue
         lines.append(line)
     return title or base_url, "\n".join(lines)
+
+
+# --- PDF ---
+
+
+class ExtractError(Exception):
+    """Из файла не удалось получить текст (не PDF, пароль, скан без текстового слоя)."""
+
+
+# «Страница 3 из 8», «стр. 3», «Page 3 of 8» — явные отметки номера страницы
+_PAGE_MARK = re.compile(r"^(?:стр\.?|страница|page)\s*\d+(?:\s*(?:из|of)\s*\d+)?$", re.IGNORECASE)
+MIN_PAGES_FOR_HEADER_DETECTION = 6
+
+
+def is_pdf_url(url: str) -> bool:
+    return urlsplit(url).path.lower().endswith(".pdf")
+
+
+def _clean_lines(text: str) -> list[str]:
+    lines = (re.sub(r"[ \t\r ​]+", " ", raw).strip() for raw in text.splitlines())
+    return [line for line in lines if line]
+
+
+def _is_page_number(line: str, page_index: int) -> bool:
+    """Одинокое число на краю страницы, близкое к номеру страницы, — это нумерация, а не данные таблицы."""
+    return line.isdigit() and len(line) <= 4 and abs(int(line) - (page_index + 1)) <= 15
+
+
+def extract_pdf(data: bytes, url: str, ignore_regex: tuple[str, ...] = ()) -> tuple[str, str]:
+    """Возвращает (заголовок, текст PDF).
+
+    Из текста убирается то, что меняется без изменения смысла и даёт ложные срабатывания:
+    номера страниц и колонтитулы, повторяющиеся на большинстве страниц.
+    """
+    from pypdf import PdfReader  # тяжёлая зависимость нужна только для PDF
+
+    if b"%PDF-" not in data[:1024]:
+        raise ExtractError("по этому адресу лежит не PDF (возможно, страница ошибки или антибот-заглушка)")
+
+    started = time.monotonic()
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted and not reader.decrypt(""):
+            raise ExtractError("PDF защищён паролем")
+        raw_pages: list[str] = []
+        for number, page in enumerate(reader.pages, 1):
+            try:
+                raw_pages.append(page.extract_text() or "")
+            except Exception as e:  # noqa: BLE001 — одна кривая страница не должна ломать весь документ
+                log.warning("  PDF: страница %d не прочитана (%s: %s)", number, type(e).__name__, e)
+                raw_pages.append("")
+    except ExtractError:
+        raise
+    except Exception as e:  # noqa: BLE001 — сторонний разбор недоверенного файла: любая ошибка = нечитаемый PDF
+        raise ExtractError(f"не удалось прочитать PDF ({type(e).__name__}: {e})") from e
+
+    pages = [_clean_lines(text) for text in raw_pages]
+
+    # Номера страниц: явные отметки везде, одинокие числа — только в начале и в конце страницы.
+    for index, lines in enumerate(pages):
+        lines[:] = [line for line in lines if not _PAGE_MARK.match(line)]
+        if lines and _is_page_number(lines[-1], index):
+            lines.pop()
+        if lines and _is_page_number(lines[0], index):
+            lines.pop(0)
+
+    # Колонтитулы: короткие строки, которые встречаются почти на каждой странице. Из страниц они убираются
+    # (иначе каждая правка давала бы шум по всему документу), но одной строкой возвращаются в конец текста:
+    # так смена версии, указанной только в колонтитуле, не остаётся незамеченной.
+    repeated: set[str] = set()
+    if len(pages) >= MIN_PAGES_FOR_HEADER_DETECTION:
+        seen_on = Counter(line for lines in pages for line in set(lines) if len(line) <= 120)
+        threshold = max(3, len(pages) // 2)
+        repeated = {line for line, count in seen_on.items() if count >= threshold}
+        pages = [[line for line in lines if line not in repeated] for lines in pages]
+
+    ignore = [re.compile(rx) for rx in ignore_regex]
+    lines = [line for page in pages for line in page if not any(rx.search(line) for rx in ignore)]
+    if not lines:
+        raise ExtractError("в PDF нет текста — похоже на скан без текстового слоя (распознавание изображений не поддерживается)")
+
+    title = lines[0] if len(lines[0]) <= 120 else PurePosixPath(unquote(urlsplit(url).path)).name or url
+    kept_repeated = sorted(line for line in repeated if not any(rx.search(line) for rx in ignore))
+    if kept_repeated:
+        lines.append("[Колонтитулы: " + " | ".join(kept_repeated) + "]")
+    log.info("  PDF: страниц %d, строк %d, разбор занял %.1f с", len(reader.pages), len(lines), time.monotonic() - started)
+    return title, "\n".join(lines)

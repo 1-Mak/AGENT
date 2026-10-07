@@ -12,7 +12,7 @@ import yaml
 from .extract import normalize_url
 from .models import Source
 
-VALID_TYPES = {"page", "list", "sitemap"}
+VALID_TYPES = {"page", "list", "sitemap", "pdf"}
 
 
 class ConfigError(Exception):
@@ -55,6 +55,7 @@ class Settings:
     llm_model: str = "deepseek-flash"
     llm_thinking: bool = False  # режим размышлений: для пересказа не нужен, а токены платные
     max_doc_chars: int = 120_000
+    max_pdf_mb: float = 50.0  # файлы больше этого размера не скачиваются
     failure_alert_threshold: int = 3
     smtp_host: str = ""
     smtp_port: int = 465
@@ -72,6 +73,7 @@ class Settings:
             db_path=env.get("SITEWATCH_DB", cls.db_path),
             user_agent=env.get("SITEWATCH_USER_AGENT", cls.user_agent),
             request_delay=float(env.get("SITEWATCH_REQUEST_DELAY", cls.request_delay)),
+            max_pdf_mb=float(env.get("SITEWATCH_MAX_PDF_MB", cls.max_pdf_mb)),
             llm_api_key=env.get("DEEPSEEK_API_KEY") or env.get("LLM_API_KEY", ""),
             llm_base_url=env.get("LLM_BASE_URL", cls.llm_base_url).rstrip("/"),
             llm_model=env.get("LLM_MODEL", cls.llm_model),
@@ -150,7 +152,7 @@ def load_sources(path: str | Path) -> list[Source]:
                 content_selector=raw.get("content_selector"),
                 ignore_regex=ignore,
                 recheck_latest=int(raw.get("recheck_latest", 0)),
-                initial_notify=int(raw.get("initial_notify", 1 if stype != "page" else 0)),
+                initial_notify=int(raw.get("initial_notify", 1 if stype in ("list", "sitemap") else 0)),
                 max_new_per_run=int(raw.get("max_new_per_run", 10)),
             )
         )

@@ -117,6 +117,44 @@ def test_menu_exits_on_eof():
     assert run_menu(lambda argv: 0, [], "c.yaml", ".env", "", eof) == 0
 
 
+def test_menu_schedule_submenu_install_remove_and_back():
+    calls = []
+    run_menu(lambda argv: calls.append(argv) or 0, ["--env", ".env"], "c.yaml", ".env", "",
+             scripted("8", "1", "09:15", "", "8", "2", "", "8", "", "", "0"))
+    assert calls == [
+        ["--env", ".env", "schedule", "status"], ["--env", ".env", "schedule", "install", "--time", "09:15"],
+        ["--env", ".env", "schedule", "status"], ["--env", ".env", "schedule", "remove"],
+        ["--env", ".env", "schedule", "status"],  # «назад»: только показали состояние
+    ]
+
+
+def test_menu_schedule_uses_default_time_on_empty_answer():
+    calls = []
+    run_menu(lambda argv: calls.append(argv) or 0, [], "c.yaml", ".env", "", scripted("8", "1", "", "", "0"))
+    assert calls[-1] == ["schedule", "install", "--time", "08:30"]
+
+
+def test_menu_env_and_tests_items_moved_to_9_and_10(monkeypatch):
+    from sitewatch import menu
+
+    opened, tests = [], []
+    monkeypatch.setattr(menu, "_open_env", lambda path: opened.append(path))
+    monkeypatch.setattr(menu, "_run_tests", lambda: tests.append(1) or 0)
+    run_menu(lambda argv: 0, [], "c.yaml", "my.env", "", scripted("9", "10", "", "0"))
+    assert opened == ["my.env"] and tests == [1]
+
+
+def test_schedule_command_is_wired_and_validates_time(capsys):
+    base = ["--log-file", ""]
+    assert cli.main(base + ["schedule", "install", "--time", "25:99"]) == 2
+    assert "ЧЧ:ММ" in capsys.readouterr().out
+
+    # не Windows: вместо создания задания — подсказка для cron
+    assert cli.main(base + ["schedule", "install", "--time", "9:05"]) == 1
+    assert "5 9 * * *" in capsys.readouterr().out
+    assert cli.main(base + ["schedule", "status"]) == 0
+
+
 # --- сквозной запуск через main() ---
 
 

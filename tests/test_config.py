@@ -82,3 +82,21 @@ def test_load_sources_rejects_bad_config(tmp_path, yaml_text, message):
 def test_load_sources_missing_file(tmp_path):
     with pytest.raises(ConfigError, match="не найден"):
         load_sources(tmp_path / "нет.yaml")
+
+
+def test_pdf_source_type_and_size_limit(tmp_path, monkeypatch):
+    p = write(
+        tmp_path,
+        """
+sources:
+  - {id: doc, type: pdf, url: "https://честныйзнак.рф/upload/TRUE_API.pdf"}
+  - {id: docs, type: list, url: "https://example.com/docs/", link_pattern: '\\.pdf$'}
+""",
+    )
+    doc, docs = load_sources(p)
+    assert doc.type == "pdf" and doc.initial_notify == 0  # большой документ при первом запуске запоминаем молча
+    assert doc.url == "https://xn--80ajghhoc2aj1c8b.xn--p1ai/upload/TRUE_API.pdf" and docs.initial_notify == 1
+
+    assert Settings.from_env().max_pdf_mb == 50.0
+    monkeypatch.setenv("SITEWATCH_MAX_PDF_MB", "5")
+    assert Settings.from_env().max_pdf_mb == 5.0

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from .config import Settings
-from .extract import extract_document, extract_links, parse_sitemap
+from .extract import ExtractError, extract_document, extract_links, extract_pdf, is_pdf_url, parse_sitemap
 from .fetch import FetchError
 from .models import Change, DocRecord, Source
 from .notify import importance_rank, render
@@ -31,6 +31,8 @@ class SourceError(Exception):
 
 class PageFetcher(Protocol):
     def get(self, url: str) -> str: ...
+
+    def get_bytes(self, url: str) -> bytes: ...
 
 
 class ChangeAnalyzer(Protocol):
@@ -78,8 +80,14 @@ def discover(source: Source, fetcher: PageFetcher) -> list[str]:
 
 
 def fetch_record(source: Source, url: str, fetcher: PageFetcher) -> DocRecord:
-    html_text = fetcher.get(url)
-    title, text = extract_document(html_text, url, source.content_selector, source.ignore_regex)
+    """Скачивает документ и приводит его к тексту: PDF — через разбор файла, остальное — как HTML."""
+    try:
+        if source.type == "pdf" or is_pdf_url(url):
+            title, text = extract_pdf(fetcher.get_bytes(url), url, source.ignore_regex)
+        else:
+            title, text = extract_document(fetcher.get(url), url, source.content_selector, source.ignore_regex)
+    except ExtractError as e:
+        raise SourceError(f"{url}: {e}") from e
     if not text.strip():
         raise SourceError(f"{url}: на странице не найден текст (вёрстка изменилась или антибот-заглушка?)")
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -116,7 +124,7 @@ def check_source(source: Source, fetcher: PageFetcher, store: Store) -> SourceRe
     res = SourceResult(source, baseline=baseline)
     log.info("[%s] проверяю %s (тип: %s)", source.id, source.url, source.type)
 
-    if source.type == "page":
+    if source.type in ("page", "pdf"):
         _classify(res, store, fetch_record(source, source.url, fetcher))
         return res
 

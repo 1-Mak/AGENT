@@ -165,7 +165,7 @@ def check_sources(sources: list[Source], fetcher: PageFetcher) -> int:
         ui.title(f"{source.name}  [{source.id}]")
         ui.info(f"тип: {source.type}; адрес: {source.url}")
         try:
-            if source.type == "page":
+            if source.type in ("page", "pdf"):
                 _preview(source, source.url, fetcher)
             elif source.type == "list":
                 page = fetcher.get(source.url)

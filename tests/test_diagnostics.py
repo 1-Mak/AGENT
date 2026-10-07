@@ -144,3 +144,17 @@ def test_check_sources_survives_garbage_sitemap(capsys):
     src = make_source(id="s", type="sitemap", url="https://x.ru/sitemap.xml")
     rc = check_sources([src], FakeFetcher({"https://x.ru/sitemap.xml": "<html>не xml"}))
     assert rc == 1 and "ошибка разбора" in capsys.readouterr().out
+
+
+def test_check_sources_pdf_shows_extracted_text_and_clear_scan_error(capsys):
+    from tests.helpers import pdf_bytes
+
+    url = "https://example.com/upload/guide.pdf"
+    source = make_source(id="guide", type="pdf", url=url, link_pattern=None)
+    rc = check_sources([source], FakeFetcher({url: pdf_bytes("guide_v1")}))
+    out = capsys.readouterr().out
+    assert rc == 0 and "версия 4.19" in out and "Срок обязательного перехода" in out
+    assert "Страница 3 из 8" not in out  # номера страниц агенту не показываем
+
+    rc = check_sources([source], FakeFetcher({url: pdf_bytes("scan")}))
+    assert rc == 1 and "скан" in capsys.readouterr().out

@@ -26,6 +26,9 @@ AUTH_REASONS = {
     403: "доступ к API DeepSeek запрещён (HTTP 403)",
 }
 RETRY_STATUSES = {429, 500, 502, 503, 504}
+# Обновлённый документ длиннее этого (например, PDF-руководство) уходит агенту без полного текста, только diff:
+# так дешевле и агент не тонет в сотнях неизменившихся страниц.
+FULL_TEXT_LIMIT = 30_000
 
 _EXAMPLE = {
     "summary": "Перенесён срок обязательной передачи данных; добавлено новое поле в карточку товара.",
@@ -76,8 +79,11 @@ def _clip(text: str, limit: int) -> tuple[str, bool]:
 def build_prompt(change: Change, max_chars: int) -> tuple[str, bool]:
     """Собирает запрос к агенту. Второй элемент — был ли обрезан текст документа."""
     src = change.source
-    text, truncated = _clip(change.record.text, max_chars)
-    text = text.replace("</document>", "<\\/document>")
+    if change.kind == "updated" and change.diff and len(change.record.text) > FULL_TEXT_LIMIT:
+        text, truncated = "(Документ большой, полный текст не приводится: изменения описаны в <diff> ниже.)", False
+    else:
+        text, truncated = _clip(change.record.text, max_chars)
+        text = text.replace("</document>", "<\\/document>")
     parts = [
         f'<source name="{html.escape(src.name, quote=True)}">{html.escape(src.focus)}</source>',
         f'<document url="{html.escape(change.record.url, quote=True)}" kind="{change.kind}" '

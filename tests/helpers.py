@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from sitewatch.config import Settings
 from sitewatch.models import Analysis, Change, DocRecord, Source
 from sitewatch.store import Store
@@ -40,6 +42,13 @@ def item_html(n: int, body: str = "Добавлено новое требова�
     <footer>© Честный ЗНАК</footer></body></html>"""
 
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def pdf_bytes(name: str) -> bytes:
+    return (FIXTURES / f"{name}.pdf").read_bytes()
+
+
 class FakeFetcher:
     def __init__(self, pages: dict[str, object]):
         self.pages = pages
@@ -51,6 +60,14 @@ class FakeFetcher:
         if isinstance(value, Exception):
             raise value
         return value  # type: ignore[return-value]
+
+    def get_bytes(self, url: str) -> bytes:
+        self.calls.append(url)
+        value = self.pages[url]
+        if isinstance(value, Exception):
+            raise value
+        assert isinstance(value, bytes), f"для {url} в макете ожидались байты (PDF)"
+        return value
 
 
 def make_analysis(importance: str = "высокая") -> Analysis:

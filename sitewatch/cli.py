@@ -19,6 +19,7 @@ from .menu import run_menu
 from .models import Source
 from .notify import MailError, send_email
 from .pipeline import run
+from .scheduler import DEFAULT_TIME, run_command as run_schedule
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -95,6 +96,13 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("test-email", help="отправить тестовое письмо, чтобы проверить настройки SMTP")
     sub.add_parser("test-llm", help="проверить ключ и модель DeepSeek на примере и показать расход токенов")
     sub.add_parser("menu", parents=[common], help="интерактивное меню")
+
+    sch = sub.add_parser("schedule", help="автозапуск раз в сутки (Планировщик заданий Windows)")
+    sch_sub = sch.add_subparsers(dest="schedule_command", required=True)
+    on = sch_sub.add_parser("install", help="включить ежедневный запуск")
+    on.add_argument("--time", default=DEFAULT_TIME, metavar="ЧЧ:ММ", help=f"во сколько запускать (по умолчанию {DEFAULT_TIME})")
+    sch_sub.add_parser("remove", help="выключить автозапуск")
+    sch_sub.add_parser("status", help="показать, настроен ли автозапуск и чем закончился прошлый запуск")
     return p
 
 
@@ -153,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
         base = ["--env", args.env, "--log-file", args.log_file] + (["-v"] if args.verbose else [])
         return run_menu(main, base, args.config, args.env, args.log_file)
 
+    if args.command == "schedule":
+        return run_schedule(args.schedule_command, getattr(args, "time", DEFAULT_TIME), args.log_file)
+
     if args.command == "doctor":
         return doctor(settings, args.config, args.env, online=not args.offline)
 
@@ -174,7 +185,9 @@ def main(argv: list[str] | None = None) -> int:
     sources = _select_sources(args.config, args.source)
     if sources is None:
         return 2
-    fetcher = Fetcher(settings.user_agent, settings.request_timeout, settings.request_delay)
+    fetcher = Fetcher(
+        settings.user_agent, settings.request_timeout, settings.request_delay, max_bytes=int(settings.max_pdf_mb * 1024 * 1024)
+    )
 
     if args.command == "check-sources":
         return check_sources(sources, fetcher)
