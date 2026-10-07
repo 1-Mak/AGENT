@@ -151,6 +151,14 @@ def test_alert_after_threshold_is_sent_once_and_reset_on_recovery():
     assert store.source_state("cz-releases").alerted is False
 
 
+def test_digest_warns_when_analyst_is_down_for_example_no_balance():
+    store, mailbox = make_store(), Mailbox()
+    reason = "на балансе DeepSeek недостаточно средств"
+    do_run(make_source(), pages_for([20, 13]), store, mailbox, FakeAnalyzer(disabled_reason=reason))
+    subject, text, _ = mailbox.sent[0]
+    assert "Агент-аналитик не работает" in text and reason in text
+
+
 def test_one_broken_item_does_not_block_the_others():
     store, mailbox = make_store(), Mailbox()
     do_run(make_source(), pages_for([6]), store, mailbox)

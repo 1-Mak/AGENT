@@ -181,6 +181,10 @@ def run(
     for change in changes:
         change.analysis = analyzer.analyze(change)
     changes.sort(key=importance_rank)
+    reason = getattr(analyzer, "disabled_reason", None)
+    if changes and reason:
+        # Например, закончились деньги на балансе: письмо уйдёт без разбора, но человек должен узнать почему.
+        alerts.append(f"Агент-аналитик не работает: {reason}. В письме только фрагменты текста.")
 
     sent = False
     if changes or alerts:

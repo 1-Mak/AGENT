@@ -41,7 +41,10 @@ class Settings:
     user_agent: str = "Mozilla/5.0 (compatible; sitewatch/0.1)"
     request_timeout: float = 30.0
     request_delay: float = 1.0
-    model: str = "claude-opus-5-5"
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-flash"
+    llm_thinking: bool = False  # режим размышлений: для пересказа не нужен, а токены платные
     max_doc_chars: int = 120_000
     failure_alert_threshold: int = 3
     smtp_host: str = ""
@@ -60,7 +63,10 @@ class Settings:
             db_path=env.get("SITEWATCH_DB", cls.db_path),
             user_agent=env.get("SITEWATCH_USER_AGENT", cls.user_agent),
             request_delay=float(env.get("SITEWATCH_REQUEST_DELAY", cls.request_delay)),
-            model=env.get("ANALYSIS_MODEL", cls.model),
+            llm_api_key=env.get("DEEPSEEK_API_KEY") or env.get("LLM_API_KEY", ""),
+            llm_base_url=env.get("LLM_BASE_URL", cls.llm_base_url).rstrip("/"),
+            llm_model=env.get("LLM_MODEL", cls.llm_model),
+            llm_thinking=env.get("LLM_THINKING", "off").strip().lower() in ("on", "1", "true", "yes"),
             smtp_host=env.get("SMTP_HOST", ""),
             smtp_port=int(env.get("SMTP_PORT", cls.smtp_port)),
             smtp_user=smtp_user,

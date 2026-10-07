@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from datetime import datetime
 
-from .analyze import Analyzer, NullAnalyzer
+from .analyze import Analyzer, LLMError, NullAnalyzer, sample_change
 from .config import ConfigError, Settings, load_dotenv, load_sources
 from .fetch import Fetcher
 from .notify import send_email
@@ -27,7 +28,36 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--no-llm", action="store_true", help="без агента-аналитика (в письме только фрагмент текста/diff)")
 
     sub.add_parser("test-email", help="отправить тестовое письмо, чтобы проверить настройки SMTP")
+    sub.add_parser("test-llm", help="проверить ключ и модель DeepSeek на примере и показать расход токенов")
     return p
+
+
+def _test_llm(settings: Settings) -> int:
+    if not settings.llm_api_key:
+        print("Не задан DEEPSEEK_API_KEY (ключ создаётся на platform.deepseek.com).", file=sys.stderr)
+        return 1
+    analyzer = Analyzer.from_settings(settings)
+    mode = "вкл" if settings.llm_thinking else "выкл"
+    print(f"Модель: {settings.llm_model} ({settings.llm_base_url}), режим размышлений: {mode}")
+    try:
+        models = analyzer.list_models()
+        print("Доступные модели:", ", ".join(models))
+        if settings.llm_model not in models:
+            print(f"ВНИМАНИЕ: модели {settings.llm_model!r} нет в списке — проверьте LLM_MODEL.", file=sys.stderr)
+    except LLMError as e:
+        print(f"Список моделей не получен ({e}), продолжаю проверку анализа.", file=sys.stderr)
+
+    result = analyzer.analyze(sample_change())
+    if result is None:
+        print(f"Анализ не удался: {analyzer.disabled_reason or 'подробности в логе'}", file=sys.stderr)
+        return 1
+    print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
+    usage = analyzer.last_usage
+    print(
+        f"Токены: вход {usage.get('prompt_tokens')} "
+        f"(из кэша {usage.get('prompt_cache_hit_tokens', 0)}), выход {usage.get('completion_tokens')}"
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     load_dotenv(args.env)
     settings = Settings.from_env()
+
+    if args.command == "test-llm":
+        return _test_llm(settings)
 
     if args.command == "test-email":
         subject = "[Мониторинг] Тестовое письмо"
@@ -67,7 +100,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    analyzer = NullAnalyzer() if args.no_llm else Analyzer(settings.model, settings.max_doc_chars)
+    if not args.no_llm and not settings.llm_api_key:
+        logging.getLogger(__name__).warning("DEEPSEEK_API_KEY не задан — письма будут без разбора агентом")
+    analyzer = NullAnalyzer() if args.no_llm else Analyzer.from_settings(settings)
     store = Store(settings.db_path)
     fetcher = Fetcher(settings.user_agent, settings.request_timeout, settings.request_delay)
     try:

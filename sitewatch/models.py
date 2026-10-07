@@ -5,29 +5,52 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Analysis(BaseModel):
-    """Структурированный разбор изменения — его заполняет агент-аналитик."""
+    """Структурированный разбор изменения — его заполняет агент-аналитик.
+
+    Валидаторы прощают типичные огрехи языковой модели (null вместо пустого списка,
+    «Высокая» с заглавной буквы), чтобы не терять разбор из-за мелочей формата.
+    """
 
     summary: str = Field(description="Суть изменения в 2-4 предложениях.")
     key_changes: list[str] = Field(
-        description="Конкретные изменения по пунктам: что добавили, убрали, поменяли."
+        default_factory=list, description="Конкретные изменения по пунктам: что добавили, убрали, поменяли."
     )
     who_is_affected: str = Field(
-        description="Кого касается изменение. Если в тексте не сказано — «не указано»."
+        default="не указано", description="Кого касается изменение. Если в тексте не сказано — «не указано»."
     )
     deadlines: list[str] = Field(
-        description="Сроки и даты вступления в силу с пояснением, к чему они относятся. Пусто, если сроков нет."
+        default_factory=list,
+        description="Сроки и даты вступления в силу с пояснением, к чему они относятся. Пусто, если сроков нет.",
     )
     required_actions: list[str] = Field(
-        description="Что нужно сделать читателю согласно тексту документа. Пусто, если не указано."
+        default_factory=list,
+        description="Что нужно сделать читателю согласно тексту документа. Пусто, если не указано.",
     )
-    importance: Literal["высокая", "средняя", "низкая"] = Field(
-        description="Важность изменения для читателя."
-    )
-    importance_reason: str = Field(description="Одно предложение: почему выбрана такая важность.")
+    importance: Literal["высокая", "средняя", "низкая"] = Field(description="Важность изменения для читателя.")
+    importance_reason: str = Field(default="", description="Одно предложение: почему выбрана такая важность.")
+
+    @field_validator("key_changes", "deadlines", "required_actions", mode="before")
+    @classmethod
+    def _as_list(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        return value
+
+    @field_validator("who_is_affected", mode="before")
+    @classmethod
+    def _affected_default(cls, value):
+        return "не указано" if value is None or value == "" else value
+
+    @field_validator("importance", mode="before")
+    @classmethod
+    def _importance_case(cls, value):
+        return value.strip().lower() if isinstance(value, str) else value
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from sitewatch.config import Settings
-from sitewatch.models import Analysis, Source
+from sitewatch.models import Analysis, Change, DocRecord, Source
 from sitewatch.store import Store
 
 BASE = "https://xn--80ajghhoc2aj1c8b.xn--p1ai"
@@ -53,9 +53,27 @@ class FakeFetcher:
         return value  # type: ignore[return-value]
 
 
+def make_analysis(importance: str = "высокая") -> Analysis:
+    return Analysis(
+        summary="Сроки сдвинуты.",
+        key_changes=["перенос срока"],
+        who_is_affected="розница",
+        deadlines=["до 01.07.2026 — переход"],
+        required_actions=["обновить интеграцию"],
+        importance=importance,
+        importance_reason="меняет срок",
+    )
+
+
+def make_change(text="Текст документа", kind="new", diff="", title="Что нового <b>20</b>") -> Change:
+    rec = DocRecord(item_url(20), "cz-releases", title, "h", text)
+    return Change(make_source(), rec, kind, diff=diff)
+
+
 class FakeAnalyzer:
-    def __init__(self, importance: str = "средняя"):
+    def __init__(self, importance: str = "средняя", disabled_reason: str | None = None):
         self.importance = importance
+        self.disabled_reason = disabled_reason
         self.seen: list[str] = []
 
     def analyze(self, change):
