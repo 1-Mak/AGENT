@@ -39,11 +39,16 @@ class Fetcher:
         last_error = "неизвестная ошибка"
         for attempt in range(self.retries + 1):
             self._throttle()
+            started = time.monotonic()
             try:
                 resp = self.session.get(url, timeout=self.timeout)
             except requests.RequestException as e:
                 last_error = f"{type(e).__name__}: {e}"
+                log.warning("GET %s -> ошибка: %s", url, last_error)
             else:
+                log.info(
+                    "GET %s -> %s, %d байт, %.1f с", url, resp.status_code, len(resp.content), time.monotonic() - started
+                )
                 if resp.status_code < 400:
                     return _decode(resp)
                 last_error = f"HTTP {resp.status_code}"

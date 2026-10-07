@@ -19,20 +19,29 @@ class ConfigError(Exception):
     pass
 
 
+_loaded_from_file: set[str] = set()  # ключи, которые в окружение положили мы, а не пользователь
+
+
 def load_dotenv(path: str | Path = ".env") -> None:
-    """Минимальный загрузчик .env: не перезаписывает уже заданные переменные окружения."""
+    """Минимальный загрузчик .env.
+
+    Настоящие переменные окружения главнее файла. Значения, которые ранее подставили из файла,
+    обновляются при повторной загрузке — так правки .env подхватываются без перезапуска меню.
+    """
     p = Path(path)
     if not p.is_file():
         return
-    for raw in p.read_text(encoding="utf-8").splitlines():
+    for raw in p.read_text(encoding="utf-8-sig").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        value = value.strip()
+        key, value = key.strip(), value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        os.environ.setdefault(key.strip(), value)
+        if key not in os.environ or key in _loaded_from_file:
+            os.environ[key] = value
+            _loaded_from_file.add(key)
 
 
 @dataclass(frozen=True)

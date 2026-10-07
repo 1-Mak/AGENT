@@ -119,6 +119,21 @@ class Store:
             )
         return self.source_state(source_id).failures
 
+    def describe_source(self, source_id: str) -> dict:
+        """Сводка для диагностики: что известно об источнике."""
+        state = self.conn.execute("SELECT * FROM sources WHERE source_id = ?", (source_id,)).fetchone()
+        docs = self.conn.execute(
+            "SELECT COUNT(*) AS n, MAX(last_changed) AS last_changed FROM documents WHERE source_id = ?", (source_id,)
+        ).fetchone()
+        return {
+            "baselined": bool(state and state["baselined"]),
+            "failures": state["consecutive_failures"] if state else 0,
+            "last_ok": state["last_ok"] if state else None,
+            "last_error": state["last_error"] if state else None,
+            "documents": docs["n"],
+            "last_changed": docs["last_changed"],
+        }
+
     def mark_alerted(self, source_id: str) -> None:
         with self.conn:
             self.conn.execute("UPDATE sources SET alerted = 1 WHERE source_id = ?", (source_id,))

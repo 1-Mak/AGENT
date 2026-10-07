@@ -131,21 +131,56 @@ def build_message(settings: Settings, subject: str, text: str, html_body: str) -
     return msg
 
 
+class MailError(RuntimeError):
+    """Письмо не ушло; текст ошибки написан для человека и подсказывает, что поправить."""
+
+
+def _explain(error: Exception, settings: Settings) -> str:
+    target = f"{settings.smtp_host}:{settings.smtp_port}"
+    if isinstance(error, smtplib.SMTPAuthenticationError):
+        return (
+            f"сервер {target} отклонил логин или пароль (SMTP_USER / SMTP_PASSWORD). "
+            "Для Gmail, Яндекс и Mail.ru нужен пароль приложения, а не обычный пароль от почты"
+        )
+    if isinstance(error, smtplib.SMTPNotSupportedError):
+        return (
+            f"сервер {target} не поддерживает авторизацию. Если он без пароля, оставьте SMTP_USER "
+            "и SMTP_PASSWORD пустыми; иначе проверьте SMTP_PORT и SMTP_SECURITY"
+        )
+    if isinstance(error, smtplib.SMTPRecipientsRefused):
+        return f"сервер не принял адреса получателей (MAIL_TO): {', '.join(error.recipients) or 'все'}"
+    if isinstance(error, smtplib.SMTPSenderRefused):
+        return "сервер не принял адрес отправителя MAIL_FROM — у многих серверов он должен совпадать с SMTP_USER"
+    if isinstance(error, ssl.SSLError):
+        return (
+            f"не удалось установить защищённое соединение с {target}: {error}. "
+            "Для порта 465 нужен SMTP_SECURITY=ssl, для порта 587 — starttls"
+        )
+    if isinstance(error, TimeoutError):
+        return f"сервер {target} не отвечает (таймаут). Проверьте SMTP_HOST, SMTP_PORT и доступ из вашей сети"
+    if isinstance(error, smtplib.SMTPException):
+        return f"ошибка почтового сервера {target}: {error}"
+    return f"не удалось подключиться к {target}: {error}. Проверьте SMTP_HOST, SMTP_PORT, интернет и файрвол"
+
+
 def send_email(settings: Settings, subject: str, text: str, html_body: str) -> None:
     missing = settings.missing_mail_settings()
     if missing:
-        raise RuntimeError(f"Не заданы настройки почты: {', '.join(missing)}")
+        raise MailError(f"не заданы настройки почты: {', '.join(missing)} (файл .env)")
     msg = build_message(settings, subject, text, html_body)
 
     security = settings.smtp_security or ("ssl" if settings.smtp_port == 465 else "starttls")
     context = ssl.create_default_context()
-    if security == "ssl":
-        server: smtplib.SMTP = smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, context=context, timeout=30)
-    else:
-        server = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30)
-    with server:
-        if security == "starttls":
-            server.starttls(context=context)
-        if settings.smtp_user:
-            server.login(settings.smtp_user, settings.smtp_password)
-        server.send_message(msg)
+    try:
+        if security == "ssl":
+            server: smtplib.SMTP = smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, context=context, timeout=30)
+        else:
+            server = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30)
+        with server:
+            if security == "starttls":
+                server.starttls(context=context)
+            if settings.smtp_user:
+                server.login(settings.smtp_user, settings.smtp_password)
+            server.send_message(msg)
+    except (smtplib.SMTPException, OSError) as e:
+        raise MailError(_explain(e, settings)) from e

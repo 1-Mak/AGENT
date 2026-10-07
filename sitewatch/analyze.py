@@ -212,6 +212,13 @@ class Analyzer:
                 return None
 
             self.last_usage = data.get("usage") or {}
+            log.info(
+                "DeepSeek (%s): токены на входе %s (из кэша %s), на выходе %s",
+                self.model,
+                self.last_usage.get("prompt_tokens"),
+                self.last_usage.get("prompt_cache_hit_tokens", 0),
+                self.last_usage.get("completion_tokens"),
+            )
             choice = (data.get("choices") or [{}])[0]
             if choice.get("finish_reason") == "length":
                 log.warning("Ответ агента обрезан по max_tokens для %s", change.record.url)
