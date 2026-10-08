@@ -134,6 +134,26 @@ class Store:
             "last_changed": docs["last_changed"],
         }
 
+    def known_sources(self) -> dict[str, int]:
+        """Какие источники есть в памяти и сколько документов о каждом известно."""
+        found = {r["source_id"]: 0 for r in self.conn.execute("SELECT source_id FROM sources")}
+        for r in self.conn.execute("SELECT source_id, COUNT(*) AS n FROM documents GROUP BY source_id"):
+            found[r["source_id"]] = r["n"]
+        return found
+
+    def reset(self, source_ids: list[str] | None = None) -> tuple[int, int]:
+        """Забывает документы и состояние источников (все или только перечисленные).
+        Возвращает (удалено документов, сброшено источников)."""
+        with self.conn:
+            if source_ids:
+                marks = ",".join("?" * len(source_ids))  # только заполнители, значения передаются отдельно
+                docs = self.conn.execute(f"DELETE FROM documents WHERE source_id IN ({marks})", source_ids).rowcount
+                sources = self.conn.execute(f"DELETE FROM sources WHERE source_id IN ({marks})", source_ids).rowcount
+            else:
+                docs = self.conn.execute("DELETE FROM documents").rowcount
+                sources = self.conn.execute("DELETE FROM sources").rowcount
+        return docs, sources
+
     def mark_alerted(self, source_id: str) -> None:
         with self.conn:
             self.conn.execute("UPDATE sources SET alerted = 1 WHERE source_id = ?", (source_id,))

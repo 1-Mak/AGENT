@@ -22,6 +22,7 @@ EXTRA = [
     ("8", "Автозапуск раз в сутки: включить / проверить / выключить"),
     ("9", "Открыть .env для редактирования"),
     ("10", "Запустить тесты"),
+    ("11", "Сбросить память: письма придут заново, как при первом запуске"),
     ("0", "Выход"),
 ]
 EXIT_WORDS = {"0", "q", "quit", "exit", "в", "выход"}
@@ -127,6 +128,13 @@ def run_menu(
             continue
         elif choice == "10":
             rc = _run_tests()
+        elif choice == "11":
+            answer = input_fn("Программа забудет всё прочитанное (резервная копия сохранится), письма придут заново. Продолжить? [y/N] ")
+            if answer.strip().lower() not in ("y", "yes", "д", "да"):
+                print("Отменено.")
+                continue
+            print(f"\n>>> sitewatch {' '.join(base_args + ['reset', '--yes'])}\n")
+            rc = cli(base_args + ["reset", "--yes"])
         else:
             print(f"Нет такого пункта: {choice!r}")
             continue

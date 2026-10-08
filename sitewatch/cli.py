@@ -6,11 +6,12 @@ import argparse
 import json
 import logging
 import logging.handlers
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__
+from . import __version__, ui
 from .analyze import Analyzer, LLMError, NullAnalyzer, sample_change
 from .config import ConfigError, Settings, load_dotenv, load_sources
 from .doctor import check_sources, doctor
@@ -97,6 +98,10 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("test-llm", help="проверить ключ и модель DeepSeek на примере и показать расход токенов")
     sub.add_parser("menu", parents=[common], help="интерактивное меню")
 
+    rs = sub.add_parser("reset", help="забыть всё прочитанное: письма придут заново, как при первом запуске")
+    rs.add_argument("--source", action="append", metavar="ID", help="сбросить только этот источник (можно несколько раз)")
+    rs.add_argument("--yes", action="store_true", help="не спрашивать подтверждение")
+
     sch = sub.add_parser("schedule", help="автозапуск раз в сутки (Планировщик заданий Windows)")
     sch_sub = sch.add_subparsers(dest="schedule_command", required=True)
     on = sch_sub.add_parser("install", help="включить ежедневный запуск")
@@ -134,6 +139,49 @@ def _test_llm(settings: Settings) -> int:
     return 0
 
 
+def _reset(settings: Settings, source_ids: list[str] | None, assume_yes: bool) -> int:
+    """Очищает память о прочитанных документах (с резервной копией), чтобы письма пришли заново."""
+    db = Path(settings.db_path)
+    if not db.exists():
+        ui.ok(f"Памяти ещё нет ({db}), сбрасывать нечего.")
+        return 0
+    store = Store(str(db))
+    try:
+        known = store.known_sources()
+        if source_ids:
+            missing = [i for i in source_ids if i not in known]
+            if missing:
+                ui.fail(f"в памяти нет источников: {', '.join(missing)}. Есть: {', '.join(known) or 'ничего'}")
+                return 2
+            known = {i: known[i] for i in source_ids}
+        if not known:
+            ui.ok("Память пуста, сбрасывать нечего.")
+            return 0
+
+        ui.title("Что программа сейчас помнит")
+        for source_id, count in known.items():
+            ui.info(f"- {source_id}: документов {count}")
+        if not assume_yes:
+            if not sys.stdin.isatty():
+                ui.fail("Подтвердить негде (нет терминала). Добавьте --yes, если уверены.")
+                return 2
+            if input("\nЗабыть всё это? Резервная копия сохранится. [y/N] ").strip().lower() not in ("y", "yes", "д", "да"):
+                print("Отменено, ничего не изменено.")
+                return 0
+
+        backup = db.with_name(db.name + ".bak")
+        shutil.copy2(db, backup)
+        docs, sources = store.reset(list(known) if source_ids else None)
+    finally:
+        store.close()
+
+    log.info("Память сброшена: документов %d, источников %d, резервная копия %s", docs, sources, backup)
+    ui.ok(f"Память очищена: документов {docs}, источников {sources}. Резервная копия: {backup}")
+    ui.info("Следующий боевой запуск поведёт себя как самый первый: по каждому списку релизов придёт письмо о самом свежем.")
+    ui.info("Одиночные страницы и PDF запоминаются молча; чтобы письмо пришло и по ним, задайте initial_notify: 1 в config/sources.yaml.")
+    return 0
+
+
 def _select_sources(config: str, wanted: list[str] | None) -> list[Source] | None:
     try:
         sources = load_sources(config)
@@ -160,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "menu":
         base = ["--env", args.env, "--log-file", args.log_file] + (["-v"] if args.verbose else [])
         return run_menu(main, base, args.config, args.env, args.log_file)
+
+    if args.command == "reset":
+        return _reset(settings, args.source, args.yes)
 
     if args.command == "schedule":
         return run_schedule(args.schedule_command, getattr(args, "time", DEFAULT_TIME), args.log_file)
