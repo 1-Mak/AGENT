@@ -47,8 +47,9 @@ def normalize_url(url: str) -> str:
     )
 
 
-def extract_links(html: str, base_url: str, pattern: str) -> list[str]:
-    """Ссылки, подходящие под pattern, в порядке появления в документе, без дублей."""
+def extract_links(html: str, base_url: str, pattern: str, strip_query: bool = False) -> list[str]:
+    """Ссылки, подходящие под pattern, в порядке появления в документе, без дублей.
+    strip_query отбрасывает ?параметры до проверки шаблона и поиска дублей."""
     rx = re.compile(pattern)
     soup = BeautifulSoup(html, "lxml")
     found: list[str] = []
@@ -58,6 +59,8 @@ def extract_links(html: str, base_url: str, pattern: str) -> list[str]:
         if href.startswith(("mailto:", "tel:", "javascript:")):
             continue
         url = normalize_url(urljoin(base_url, href))
+        if strip_query:
+            url = urlunsplit(urlsplit(url)._replace(query=""))
         if url in seen or not rx.search(url):
             continue
         seen.add(url)

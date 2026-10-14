@@ -11,9 +11,11 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Callable, Protocol
 
 from .config import Settings
+from .deadlines import collect_deadlines, due_reminders, merge, upcoming
 from .extract import (
     ExtractError,
     extract_document,
@@ -27,7 +29,7 @@ from .extract import (
     parse_telegram,
 )
 from .fetch import FetchError
-from .models import Change, DocRecord, Scope, Source
+from .models import Change, Deadline, DocRecord, Scope, Source
 from .notify import importance_rank, render
 from .robots import GuardedFetcher, RobotsPolicy
 from .store import Store
@@ -67,6 +69,7 @@ class RunReport:
     total_sources: int
     sent: bool
     filtered: list[Change] = field(default_factory=list)  # не относятся к теме читателя, в письмо не вошли
+    reminders: list[Deadline] = field(default_factory=list)  # сроки, о которых напомнило это письмо
 
 
 # --- обнаружение документов ---
@@ -75,7 +78,7 @@ class RunReport:
 def discover(source: Source, fetcher: PageFetcher) -> list[str]:
     """Адреса документов источника, от новых к старым (насколько это известно из страницы)."""
     if source.type == "list":
-        return extract_links(fetcher.get(source.url), source.url, source.link_pattern)
+        return extract_links(fetcher.get(source.url), source.url, source.link_pattern, source.strip_query)
 
     # sitemap
     rx = re.compile(source.link_pattern)
@@ -237,6 +240,15 @@ def check_source(source: Source, fetcher: PageFetcher, store: Store) -> SourceRe
 # --- запуск ---
 
 
+def pick_fetcher(source: Source, http: PageFetcher, browser: PageFetcher | None) -> PageFetcher:
+    """Обычный загрузчик или браузер, как задано в источнике (fetch: browser)."""
+    if source.fetch != "browser":
+        return http
+    if browser is None:
+        raise SourceError("для источника задано fetch: browser, но браузерный загрузчик не подключён")
+    return browser
+
+
 def run(
     sources: list[Source],
     *,
@@ -248,6 +260,8 @@ def run(
     scope: Scope | None = None,
     dry_run: bool = False,
     out: Callable[[str], None] = print,
+    browser: PageFetcher | None = None,
+    today: date | None = None,
 ) -> RunReport:
     log.info(
         "Запуск: источников %d, режим: %s",
@@ -261,8 +275,9 @@ def run(
     robots = RobotsPolicy(fetcher)
     for source in sources:
         mode = source.robots or settings.robots_mode
-        source_fetcher = GuardedFetcher(fetcher, robots, mode) if mode in ("respect", "warn") else fetcher
         try:
+            base = pick_fetcher(source, fetcher, browser)
+            source_fetcher = GuardedFetcher(base, robots, mode) if mode in ("respect", "warn") else base
             results.append(check_source(source, source_fetcher, store))
         except (SourceError, FetchError) as e:
             failed += 1
@@ -299,14 +314,29 @@ def run(
         changes = kept
 
     changes.sort(key=importance_rank)
+
+    # Реестр сроков: новые сроки из документов + ручные из milestones.yaml; напоминания по порогам 30/14/7/3/1/0 дней.
+    today = today or date.today()
+    manual = list(scope.milestones)
+    new_deadlines = [d for c in changes for d in collect_deadlines(c)]
+    manual_keys = {d.key for d in manual}
+    known = [d for d in store.load_deadlines() if not d.manual or d.key in manual_keys]
+    registry = merge(known, manual + new_deadlines)
+    due = due_reminders(registry, today)
+    if new_deadlines or due:
+        log.info("Сроки: новых из документов %d, напоминаний %d", len(new_deadlines), len(due))
+
     reason = getattr(analyzer, "disabled_reason", None)
     if changes and reason:
         # Например, закончились деньги на балансе: письмо уйдёт без разбора, но человек должен узнать почему.
         alerts.append(f"Агент-аналитик не работает: {reason}. В письме только фрагменты текста.")
 
     sent = False
-    if changes or alerts:
-        subject, text, html_body = render(changes, alerts, scope=scope, filtered=filtered)
+    if changes or alerts or due:
+        subject, text, html_body = render(
+            changes, alerts, scope=scope, filtered=filtered,
+            deadlines=upcoming(registry, today), reminded={d.key for d, _ in due}, today=today,
+        )
         if dry_run:
             log.info("Пробный режим: письмо «%s» не отправляется, вот его текст:", subject)
             out(f"Тема: {subject}\n\n{text}")
@@ -327,10 +357,14 @@ def run(
             saved += len(records)
         for sid in alerted_ids:
             store.mark_alerted(sid)
+        store.sync_manual_deadlines(manual)
+        store.save_deadlines(new_deadlines)
+        if sent:
+            store.mark_reminded({d.key: t for d, t in due})
         log.info("Состояние сохранено (записей: %d)", saved)
 
     log.info(
         "Готово: источников %d (сбоев %d), обновлений в письме %d, отфильтровано по теме %d",
         len(sources), failed, len(changes), len(filtered),
     )
-    return RunReport(changes, alerts, failed, len(sources), sent, filtered)
+    return RunReport(changes, alerts, failed, len(sources), sent, filtered, [d for d, _ in due] if sent else [])

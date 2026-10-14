@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from .models import DocRecord
+from .models import Deadline, DocRecord
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -29,6 +30,20 @@ CREATE TABLE IF NOT EXISTS sources (
     alerted              INTEGER NOT NULL DEFAULT 0,
     last_ok              TEXT,
     last_error           TEXT
+);
+CREATE TABLE IF NOT EXISTS deadlines (
+    key         TEXT PRIMARY KEY,
+    due         TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    origin      TEXT NOT NULL DEFAULT '',
+    url         TEXT NOT NULL DEFAULT '',
+    approx      INTEGER NOT NULL DEFAULT 0,
+    components  TEXT NOT NULL DEFAULT '[]',
+    note        TEXT NOT NULL DEFAULT '',
+    manual      INTEGER NOT NULL DEFAULT 0,
+    reminded_at INTEGER,
+    dismissed   INTEGER NOT NULL DEFAULT 0,
+    first_seen  TEXT NOT NULL
 );
 """
 
@@ -153,6 +168,69 @@ class Store:
                 docs = self.conn.execute("DELETE FROM documents").rowcount
                 sources = self.conn.execute("DELETE FROM sources").rowcount
         return docs, sources
+
+    # --- реестр сроков ---
+
+    def load_deadlines(self) -> list[Deadline]:
+        rows = self.conn.execute("SELECT * FROM deadlines ORDER BY due, title")
+        return [
+            Deadline(
+                due=date.fromisoformat(r["due"]),
+                title=r["title"],
+                origin=r["origin"],
+                url=r["url"],
+                approx=bool(r["approx"]),
+                components=tuple(json.loads(r["components"])),
+                note=r["note"],
+                manual=bool(r["manual"]),
+                reminded_at=r["reminded_at"],
+                dismissed=bool(r["dismissed"]),
+            )
+            for r in rows
+        ]
+
+    def save_deadlines(self, deadlines: Iterable[Deadline]) -> None:
+        """Добавляет сроки; у уже известных обновляет описание, но не трогает «напомнено» и «снято»."""
+        now = _now()
+        with self.conn:
+            for d in deadlines:
+                self.conn.execute(
+                    """
+                    INSERT INTO deadlines(key, due, title, origin, url, approx, components, note, manual, first_seen)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        origin = excluded.origin, url = excluded.url, approx = excluded.approx,
+                        components = excluded.components, note = excluded.note
+                    """,
+                    (
+                        d.key, d.due.isoformat(), d.title, d.origin, d.url, int(d.approx),
+                        json.dumps(list(d.components), ensure_ascii=False), d.note, int(d.manual), now,
+                    ),
+                )
+
+    def sync_manual_deadlines(self, current: Iterable[Deadline]) -> int:
+        """Ручные сроки в базе приводятся к файлу milestones.yaml: удалённые из файла убираются. Возвращает, сколько убрано."""
+        current = list(current)
+        keep = {d.key for d in current}
+        self.save_deadlines(current)
+        with self.conn:
+            stale = [r["key"] for r in self.conn.execute("SELECT key FROM deadlines WHERE manual = 1") if r["key"] not in keep]
+            for key in stale:
+                self.conn.execute("DELETE FROM deadlines WHERE key = ?", (key,))
+        return len(stale)
+
+    def mark_reminded(self, thresholds: dict[str, int]) -> None:
+        with self.conn:
+            for key, threshold in thresholds.items():
+                self.conn.execute("UPDATE deadlines SET reminded_at = ? WHERE key = ?", (threshold, key))
+
+    def dismiss_deadline(self, key_prefix: str) -> list[str]:
+        """Снимает срок с календаря (напоминания прекращаются). Ключ можно писать начало. Возвращает снятые заголовки."""
+        rows = self.conn.execute("SELECT key, title FROM deadlines WHERE key LIKE ?", (key_prefix.strip() + "%",)).fetchall()
+        with self.conn:
+            for r in rows:
+                self.conn.execute("UPDATE deadlines SET dismissed = 1 WHERE key = ?", (r["key"],))
+        return [r["title"] for r in rows]
 
     def mark_alerted(self, source_id: str) -> None:
         with self.conn:

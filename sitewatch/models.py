@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -93,6 +96,8 @@ class Source:
     max_new_per_run: int = 10
     enabled: bool = True  # выключенный источник не участвует в run, но его можно проверить через check-sources
     robots: str = ""  # respect | warn | off; пусто — как в настройках (SITEWATCH_ROBOTS)
+    strip_query: bool = False  # у найденных ссылок отбрасывается ?query: одна тема форума с разными параметрами = один документ
+    fetch: str = "http"  # http | browser: browser — страницу открывает настоящий браузер (для сайтов с JS и антиботом)
 
 
 @dataclass(frozen=True)
@@ -105,12 +110,36 @@ class GlossaryEntry:
 
 
 @dataclass(frozen=True)
+class Deadline:
+    """Срок из реестра: найден агентом в документе или внесён вручную (config/milestones.yaml)."""
+
+    due: date
+    title: str
+    origin: str = ""  # откуда срок: «название источника: заголовок документа» или «вручную»
+    url: str = ""
+    approx: bool = False  # в документе указан только месяц: срок взят как конец месяца
+    components: tuple[str, ...] = ()  # записи глоссария, которых касается срок
+    note: str = ""
+    manual: bool = False
+    reminded_at: int | None = None  # самый малый порог напоминания (в днях), о котором уже писали
+    dismissed: bool = False  # снят вручную (sitewatch deadlines --done)
+
+    @property
+    def key(self) -> str:
+        """Короткий устойчивый идентификатор: одинаковый срок из разных запусков не дублируется."""
+        norm = re.sub(r"\W+", " ", self.title.casefold()).strip()
+        raw = f"{self.due.isoformat()}|{norm}|{'manual' if self.manual else self.url}"
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+
+
+@dataclass(frozen=True)
 class Scope:
     """Что нужно читателю. Пустые interests — фильтра нет, присылается всё найденное."""
 
     interests: str = ""
     include_general: bool = True  # общие изменения (API, авторизация, форматы) касаются и вашей темы
     glossary: tuple[GlossaryEntry, ...] = ()
+    milestones: tuple[Deadline, ...] = ()  # известные вручную сроки из config/milestones.yaml
 
 
 @dataclass

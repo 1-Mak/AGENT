@@ -15,7 +15,7 @@ from .config import ConfigError, Settings, load_scope, load_sources
 from .extract import extract_document, extract_links, parse_telegram
 from .fetch import FetchError
 from .models import Source
-from .pipeline import PageFetcher, SourceError, discover, fetch_record
+from .pipeline import PageFetcher, SourceError, discover, fetch_record, pick_fetcher
 from .robots import GuardedFetcher, RobotsPolicy
 from .store import Store
 
@@ -199,21 +199,27 @@ def _report_robots(policy: RobotsPolicy, source: Source, mode: str) -> bool:
     return not verdict.allowed and mode == "respect"
 
 
-def check_sources(sources: list[Source], fetcher: PageFetcher, robots_mode: str = "off") -> int:
+def check_sources(sources: list[Source], fetcher: PageFetcher, robots_mode: str = "off", browser: PageFetcher | None = None) -> int:
     """Показывает, что видит парсер на каждом сайте. Базу не трогает, писем не шлёт."""
     fails = 0
     policy = RobotsPolicy(fetcher)
     for source in sources:
         ui.title(f"{source.name}  [{source.id}]" + ("" if source.enabled else "  (ВЫКЛЮЧЕН)"))
-        ui.info(f"тип: {source.type}; адрес: {source.url}")
+        ui.info(f"тип: {source.type}; адрес: {source.url}" + ("; загрузка: браузером" if source.fetch == "browser" else ""))
+        try:
+            base = pick_fetcher(source, fetcher, browser)
+        except SourceError as e:
+            fails += 1
+            ui.fail(str(e))
+            continue
         mode = source.robots or robots_mode
         if mode in ("respect", "warn"):
             if _report_robots(policy, source, mode):
                 fails += 1
                 continue  # запрещено — страницу не запрашиваем, причина уже показана
-            fetcher_for_source: PageFetcher = GuardedFetcher(fetcher, policy, mode)
+            fetcher_for_source: PageFetcher = GuardedFetcher(base, policy, mode)
         else:
-            fetcher_for_source = fetcher
+            fetcher_for_source = base
         fetcher_ = fetcher_for_source
         try:
             if source.type in ("page", "pdf", "text"):
@@ -233,7 +239,7 @@ def check_sources(sources: list[Source], fetcher: PageFetcher, robots_mode: str 
                 page = fetcher_.get(source.url)
                 page_title, _ = extract_document(page, source.url)
                 ui.ok(f"страница списка загружена: «{page_title}», {len(page)} символов HTML")
-                matches = extract_links(page, source.url, source.link_pattern)
+                matches = extract_links(page, source.url, source.link_pattern, source.strip_query)
                 if matches:
                     ui.ok(f"ссылок по шаблону {source.link_pattern!r}: {len(matches)} (первая — самая свежая)")
                     _show_links(matches)

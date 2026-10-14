@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+browser = ["playwright>=1.40"]  # для источников с fetch: browser
 
 [project.scripts]
 sitewatch = "sitewatch.cli:main"

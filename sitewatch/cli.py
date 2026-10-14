@@ -8,12 +8,14 @@ import logging
 import logging.handlers
 import shutil
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from . import __version__, ui
 from .analyze import Analyzer, LLMError, NullAnalyzer, sample_change
+from .browser import LazyBrowser
 from .config import ConfigError, Settings, load_dotenv, load_scope, load_sources
+from .deadlines import days_left, describe_days, merge
 from .doctor import check_sources, doctor
 from .fetch import Fetcher
 from .menu import run_menu
@@ -97,6 +99,10 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("test-email", help="отправить тестовое письмо, чтобы проверить настройки SMTP")
     sub.add_parser("test-llm", help="проверить ключ и модель DeepSeek на примере и показать расход токенов")
     sub.add_parser("menu", parents=[common], help="интерактивное меню")
+
+    dl = sub.add_parser("deadlines", parents=[common], help="календарь сроков: что и когда вступает в силу")
+    dl.add_argument("--all", action="store_true", help="показать и прошедшие, и снятые сроки")
+    dl.add_argument("--done", metavar="КЛЮЧ", help="снять срок с календаря (напоминания прекратятся); ключ — первая колонка списка")
 
     rs = sub.add_parser("reset", help="забыть всё прочитанное: письма придут заново, как при первом запуске")
     rs.add_argument("--source", action="append", metavar="ID", help="сбросить только этот источник (можно несколько раз)")
@@ -182,6 +188,48 @@ def _reset(settings: Settings, source_ids: list[str] | None, assume_yes: bool) -
     return 0
 
 
+def _deadlines(settings: Settings, config: str, show_all: bool, done: str | None, today: date | None = None) -> int:
+    """Показывает календарь сроков (из документов и из milestones.yaml) или снимает срок с напоминаний."""
+    try:
+        scope = load_scope(config)
+    except ConfigError as e:
+        ui.fail(f"ошибка конфигурации: {e}")
+        return 2
+    today = today or date.today()
+    store = Store(settings.db_path)
+    try:
+        removed = store.sync_manual_deadlines(scope.milestones)  # ручные сроки приводим к файлу milestones.yaml
+        if done:
+            titles = store.dismiss_deadline(done)
+            if not titles:
+                ui.fail(f"нет срока с ключом {done!r}")
+                return 2
+            for t in titles:
+                ui.ok(f"снят с календаря: {t}")
+            return 0
+        entries = merge([], store.load_deadlines())
+    finally:
+        store.close()
+    if removed:
+        ui.info(f"из календаря убрано ручных сроков, которых больше нет в файле: {removed}")
+    where = {e.name: e.where for e in scope.glossary}
+    shown = [d for d in entries if show_all or (not d.dismissed and days_left(d, today) >= -14)]
+    if not shown:
+        ui.ok("В календаре нет сроков. Они появятся, когда агент найдёт даты в документах, или вы добавите их в config/milestones.yaml.")
+        return 0
+    ui.title(f"Календарь сроков на {today:%d.%m.%Y}")
+    for d in shown:
+        flags = (" ~месяц" if d.approx else "") + (" [снят]" if d.dismissed else "")
+        print(f" {d.key}  {d.due:%d.%m.%Y}  {describe_days(d, today):<18}{flags}  {d.title}")
+        ui.info(f"источник: {d.origin or 'не указан'}" + (f"  {d.url}" if d.url else ""))
+        if d.components:
+            ui.info("менять: " + ", ".join(f"{n} -> {where[n]}" if where.get(n) else n for n in d.components))
+        if d.note:
+            ui.info(d.note)
+    print("\nСнять срок с напоминаний: sitewatch deadlines --done КЛЮЧ")
+    return 0
+
+
 def _select_sources(config: str, wanted: list[str] | None, *, include_disabled: bool = False) -> list[Source] | None:
     """Источники для команды. Явно названные через --source берутся даже выключенные (чтобы проверить до включения)."""
     try:
@@ -222,6 +270,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "schedule":
         return run_schedule(args.schedule_command, getattr(args, "time", DEFAULT_TIME), args.log_file)
 
+    if args.command == "deadlines":
+        return _deadlines(settings, args.config, args.all, args.done)
+
     if args.command == "doctor":
         return doctor(settings, args.config, args.env, online=not args.offline)
 
@@ -247,8 +298,18 @@ def main(argv: list[str] | None = None) -> int:
         settings.user_agent, settings.request_timeout, settings.request_delay, max_bytes=int(settings.max_pdf_mb * 1024 * 1024)
     )
 
+    browser = LazyBrowser(
+        user_agent=settings.user_agent, timeout=settings.request_timeout, delay=settings.request_delay, channel=settings.browser
+    )
+    try:
+        return _run_with_browser(args, settings, sources, fetcher, browser)
+    finally:
+        browser.close()
+
+
+def _run_with_browser(args, settings: Settings, sources: list[Source], fetcher: Fetcher, browser: LazyBrowser) -> int:
     if args.command == "check-sources":
-        return check_sources(sources, fetcher, settings.robots_mode)
+        return check_sources(sources, fetcher, settings.robots_mode, browser)
 
     # run
     if not args.dry_run and settings.missing_mail_settings():
@@ -285,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
             settings=settings,
             scope=scope,
             dry_run=args.dry_run,
+            browser=browser,
         )
     except MailError as e:
         log.error("Письмо не отправлено: %s", e)

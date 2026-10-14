@@ -5,12 +5,13 @@ from __future__ import annotations
 import html
 import smtplib
 import ssl
-from datetime import datetime
+from datetime import date, datetime
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 
 from .config import Settings
-from .models import Change, Scope
+from .deadlines import describe_days, days_left
+from .models import Change, Deadline, Scope
 
 KIND_LABEL = {"new": "новая страница", "updated": "страница обновлена"}
 IMPORTANCE_ORDER = {"высокая": 0, "средняя": 1, "низкая": 2}
@@ -34,7 +35,10 @@ def _fallback_excerpt(change: Change) -> str:
     return text[:EXCERPT_CHARS] + ("…" if len(text) > EXCERPT_CHARS else "")
 
 
-def _subject(changes: list[Change], alerts: list[str]) -> str:
+def _subject(changes: list[Change], alerts: list[str], reminders: list[Deadline] = (), today: date | None = None) -> str:
+    if not changes and reminders and not alerts:
+        first = min(reminders, key=lambda d: d.due)
+        return f"[Мониторинг] Срок {describe_days(first, today or date.today())} ({first.due:%d.%m.%Y}): {first.title[:100]}"
     if not changes:
         return "[Мониторинг] Сбой: источник недоступен"
     top = changes[0]
@@ -59,10 +63,16 @@ def render(
     *,
     scope: Scope | None = None,
     filtered: list[Change] | tuple = (),
+    deadlines: list[Deadline] | tuple = (),
+    reminded: set[str] | frozenset = frozenset(),
+    today: date | None = None,
 ) -> tuple[str, str, str]:
-    """Возвращает (тема, текстовая версия, HTML-версия)."""
-    date = (now or datetime.now()).strftime("%d.%m.%Y")
-    header = f"Мониторинг документации — {date}"
+    """Возвращает (тема, текстовая версия, HTML-версия).
+
+    deadlines — сроки для блока «Ближайшие сроки»; reminded — ключи тех из них, о которых письмо напоминает впервые.
+    """
+    today = today or (now.date() if now else date.today())
+    header = f"Мониторинг документации — {(now or datetime.now()).strftime('%d.%m.%Y')}"
     text: list[str] = [header, ""]
     body: list[str] = [f"<h2 style='margin:0 0 4px'>{html.escape(header)}</h2>"]
     where = {e.name: e.where for e in (scope.glossary if scope else ())}
@@ -142,6 +152,33 @@ def render(
             + "</ul></div>"
         )
 
+    if deadlines:
+        lines = []
+        for d in deadlines:
+            left = days_left(d, today)
+            line = f"{d.due:%d.%m.%Y} ({describe_days(d, today)}){' ~месяц' if d.approx else ''}: {d.title}"
+            tail = [d.origin] if d.origin else []
+            if d.components:
+                tail.append("менять: " + ", ".join(f"{n} → {where[n]}" if where.get(n) else n for n in d.components))
+            if d.note:
+                tail.append(d.note)
+            lines.append((line, " · ".join(tail), d.key in reminded, left < 0))
+        text += ["Ближайшие сроки:"] + [
+            f" - {l}" + (f" [{t}]" if t else "") + (" (напоминание)" if r else "") + (" (уже прошёл: проверьте, что сделано)" if past else "")
+            for l, t, r, past in lines
+        ] + [""]
+        items = []
+        for l, t, r, past in lines:
+            style = " style='color:#c62828'" if r else ""
+            detail = f"<br><span style='color:#777;font-size:12px'>{html.escape(t)}</span>" if t else ""
+            mark = "<b> — напоминание</b>" if r else ""
+            gone = " <i>(уже прошёл: проверьте, что сделано)</i>" if past else ""
+            items.append(f"<li{style}>{html.escape(l)}{detail}{mark}{gone}</li>")
+        body.append(
+            "<div style='border-top:1px solid #ddd;padding:12px 0'><b>Ближайшие сроки</b>"
+            "<ul style='margin:4px 0'>" + "".join(items) + "</ul></div>"
+        )
+
     if alerts:
         text += ["Сбои мониторинга:"] + [f" - {m}" for m in alerts] + [""]
         body.append(
@@ -155,7 +192,8 @@ def render(
         + "".join(body)
         + "</body></html>"
     )
-    return _subject(changes, alerts), "\n".join(text).rstrip() + "\n", html_doc
+    due = [d for d in deadlines if d.key in reminded]
+    return _subject(changes, alerts, due, today), "\n".join(text).rstrip() + "\n", html_doc
 
 
 def build_message(settings: Settings, subject: str, text: str, html_body: str) -> EmailMessage:

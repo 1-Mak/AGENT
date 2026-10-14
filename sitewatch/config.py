@@ -5,15 +5,17 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
 
 from .extract import normalize_url
-from .models import GlossaryEntry, Scope, Source
+from .models import Deadline, GlossaryEntry, Scope, Source
 
 VALID_TYPES = {"page", "list", "sitemap", "pdf", "text", "telegram"}
 VALID_ROBOTS = {"", "respect", "warn", "off"}
+VALID_FETCH = {"http", "browser"}
 
 
 class ConfigError(Exception):
@@ -57,6 +59,7 @@ class Settings:
     llm_thinking: bool = False  # режим размышлений: для пересказа не нужен, а токены платные
     max_doc_chars: int = 120_000
     max_pdf_mb: float = 50.0  # файлы больше этого размера не скачиваются
+    browser: str = ""  # какой браузер открывает источники с fetch: browser: msedge | chrome | chromium; пусто — подобрать
     robots_mode: str = "respect"  # respect — не ходить туда, где запрещает robots.txt; warn — только предупреждать; off
     failure_alert_threshold: int = 3
     smtp_host: str = ""
@@ -76,6 +79,7 @@ class Settings:
             user_agent=env.get("SITEWATCH_USER_AGENT", cls.user_agent),
             request_delay=float(env.get("SITEWATCH_REQUEST_DELAY", cls.request_delay)),
             max_pdf_mb=float(env.get("SITEWATCH_MAX_PDF_MB", cls.max_pdf_mb)),
+            browser=env.get("SITEWATCH_BROWSER", "").strip().lower(),
             robots_mode=env.get("SITEWATCH_ROBOTS", cls.robots_mode).strip().lower() or cls.robots_mode,
             llm_api_key=env.get("DEEPSEEK_API_KEY") or env.get("LLM_API_KEY", ""),
             llm_base_url=env.get("LLM_BASE_URL", cls.llm_base_url).rstrip("/"),
@@ -148,6 +152,12 @@ def load_sources(path: str | Path) -> list[Source]:
         if robots not in VALID_ROBOTS:
             raise ConfigError(f"{where}: robots должен быть respect, warn или off (получено: {robots!r})")
 
+        fetch = str(raw.get("fetch") or "http").lower()
+        if fetch not in VALID_FETCH:
+            raise ConfigError(f"{where}: fetch должен быть http или browser (получено: {fetch!r})")
+        if fetch == "browser" and raw["url"].lower().startswith("file:"):
+            raise ConfigError(f"{where}: fetch: browser не нужен для локальных файлов (file://)")
+
         sources.append(
             Source(
                 id=sid,
@@ -163,6 +173,8 @@ def load_sources(path: str | Path) -> list[Source]:
                 max_new_per_run=int(raw.get("max_new_per_run", 10)),
                 enabled=bool(raw.get("enabled", True)),
                 robots=robots,
+                fetch=fetch,
+                strip_query=bool(raw.get("strip_query", False)),
             )
         )
     return sources
@@ -193,6 +205,58 @@ def load_glossary(path: Path) -> tuple[GlossaryEntry, ...]:
     return tuple(entries)
 
 
+def _parse_date(value, where: str) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    raise ConfigError(f"{where}: не понимаю дату {text!r}, нужен вид ДД.ММ.ГГГГ")
+
+
+def load_milestones(path: Path) -> tuple[Deadline, ...]:
+    """Сроки, которые вы знаете сами (из рассылки ЧЗ, письма клиента): config/milestones.yaml."""
+    items = []
+    for i, raw in enumerate(_read_yaml(path, "календарь сроков").get("milestones") or [], 1):
+        where = f"календарь сроков {path}: запись №{i}"
+        if not isinstance(raw, dict) or not raw.get("title") or not raw.get("date"):
+            raise ConfigError(f"{where}: нужны поля date и title")
+        components = raw.get("components") or []
+        if isinstance(components, str):
+            components = [components]
+        items.append(
+            Deadline(
+                due=_parse_date(raw["date"], where),
+                title=" ".join(str(raw["title"]).split()),
+                origin=" ".join(str(raw.get("origin") or "вручную").split()),
+                url=str(raw.get("url") or ""),
+                approx=bool(raw.get("approx", False)),
+                components=tuple(str(c).strip() for c in components if str(c).strip()),
+                note=" ".join(str(raw.get("note") or "").split()),
+                manual=True,
+            )
+        )
+    return tuple(items)
+
+
+def _resolve_file(config: Path, value: str, what: str) -> Path:
+    candidate = Path(value)
+    if candidate.is_absolute():
+        found = candidate
+    else:
+        # сначала рядом с файлом источников, потом от рабочей папки (так пишут и «glossary.yaml», и «config/glossary.yaml»)
+        options = [config.parent / candidate, Path.cwd() / candidate]
+        found = next((c for c in options if c.is_file()), options[0])
+    if not found.is_file():
+        raise ConfigError(f"{what}: файл не найден: {value}")
+    return found
+
+
 def load_scope(path: str | Path) -> Scope:
     """Блок scope из файла источников: тема, которая нужна читателю, и таблица «что где менять»."""
     p = Path(path)
@@ -201,16 +265,13 @@ def load_scope(path: str | Path) -> Scope:
         raise ConfigError(f"{p}: scope должен быть словарём")
     glossary: tuple[GlossaryEntry, ...] = ()
     if block.get("glossary"):
-        gpath = Path(str(block["glossary"]))
-        if not gpath.is_absolute():
-            # сначала рядом с файлом источников, потом от рабочей папки (так пишут и «glossary.yaml», и «config/glossary.yaml»)
-            candidates = [p.parent / gpath, Path.cwd() / gpath]
-            gpath = next((c for c in candidates if c.is_file()), candidates[0])
-        if not gpath.is_file():
-            raise ConfigError(f"scope.glossary: файл не найден: {block['glossary']}")
-        glossary = load_glossary(gpath)
+        glossary = load_glossary(_resolve_file(p, str(block["glossary"]), "scope.glossary"))
+    milestones: tuple[Deadline, ...] = ()
+    if block.get("milestones"):
+        milestones = load_milestones(_resolve_file(p, str(block["milestones"]), "scope.milestones"))
     return Scope(
         interests=" ".join(str(block.get("interests") or "").split()),
         include_general=bool(block.get("include_general", True)),
         glossary=glossary,
+        milestones=milestones,
     )
