@@ -1,4 +1,4 @@
-"""Командная строка sitewatch: run, doctor, check-sources, test-llm, test-email, menu."""
+"""Командная строка sitewatch: run, doctor, check-sources, probes, logwatch, test-llm, test-email, menu."""
 
 from __future__ import annotations
 
@@ -16,11 +16,14 @@ from .analyze import Analyzer, LLMError, NullAnalyzer, sample_change
 from .config import ConfigError, Settings, load_dotenv, load_scope, load_sources
 from .doctor import check_sources, doctor
 from .fetch import Fetcher
+from .logwatch import load_logwatch, run_logwatch
 from .menu import run_menu
 from .models import Source
 from .notify import MailError, send_email
 from .pipeline import run
+from .probes import load_probes, run_probes
 from .scheduler import DEFAULT_TIME, run_command as run_schedule
+from .signals import MonitorResult
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -71,6 +74,13 @@ def shutdown_logging() -> None:
     _installed_handlers.clear()
 
 
+def _monitor_args(parser: argparse.ArgumentParser, *, probes: bool = False, logs: bool = False) -> None:
+    if probes:
+        parser.add_argument("--probes", metavar="ФАЙЛ", help="файл контрольных вызовов API (по умолчанию probes.yaml рядом с --config)")
+    if logs:
+        parser.add_argument("--logwatch", metavar="ФАЙЛ", help="файл со списком журналов (по умолчанию logwatch.yaml рядом с --config)")
+
+
 def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--config", default="config/sources.yaml", help="файл с источниками")
@@ -87,12 +97,22 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--source", action="append", metavar="ID", help="проверять только этот источник (можно несколько раз)")
     r.add_argument("--dry-run", action="store_true", help="ничего не отправлять и не сохранять, письмо вывести на экран")
     r.add_argument("--no-llm", action="store_true", help="без агента-аналитика (в письме только фрагмент текста/diff)")
+    r.add_argument("--no-monitors", action="store_true", help="не выполнять контрольные вызовы API и не читать журнал интеграции")
+    _monitor_args(r, probes=True, logs=True)
 
     d = sub.add_parser("doctor", parents=[common], help="проверить настройки, состояние и соединения")
     d.add_argument("--offline", action="store_true", help="не проверять сетевые соединения")
 
     c = sub.add_parser("check-sources", parents=[common], help="показать, что видит парсер на сайтах (базу не трогает)")
     c.add_argument("--source", action="append", metavar="ID", help="только этот источник")
+
+    pr = sub.add_parser("probes", parents=[common], help="контрольные вызовы API: что отвечают методы и что изменилось с прошлого раза")
+    _monitor_args(pr, probes=True)
+    pr.add_argument("--save", action="store_true", help="запомнить сегодняшние ответы как исходные (по умолчанию ничего не сохраняется)")
+
+    lw = sub.add_parser("logwatch", parents=[common], help="счётчики ошибок в журнале интеграции за время с прошлой проверки")
+    _monitor_args(lw, logs=True)
+    lw.add_argument("--save", action="store_true", help="запомнить позицию в журнале и счётчики (по умолчанию ничего не сохраняется)")
 
     sub.add_parser("test-email", help="отправить тестовое письмо, чтобы проверить настройки SMTP")
     sub.add_parser("test-llm", help="проверить ключ и модель DeepSeek на примере и показать расход токенов")
@@ -154,13 +174,16 @@ def _reset(settings: Settings, source_ids: list[str] | None, assume_yes: bool) -
                 ui.fail(f"в памяти нет источников: {', '.join(missing)}. Есть: {', '.join(known) or 'ничего'}")
                 return 2
             known = {i: known[i] for i in source_ids}
-        if not known:
+        monitors = 0 if source_ids else store.monitor_state_count()
+        if not known and not monitors:
             ui.ok("Память пуста, сбрасывать нечего.")
             return 0
 
         ui.title("Что программа сейчас помнит")
         for source_id, count in known.items():
             ui.info(f"- {source_id}: документов {count}")
+        if monitors:
+            ui.info(f"- контрольные вызовы API и журналы интеграции: записей {monitors}")
         if not assume_yes:
             if not sys.stdin.isatty():
                 ui.fail("Подтвердить негде (нет терминала). Добавьте --yes, если уверены.")
@@ -172,6 +195,8 @@ def _reset(settings: Settings, source_ids: list[str] | None, assume_yes: bool) -
         backup = db.with_name(db.name + ".bak")
         shutil.copy2(db, backup)
         docs, sources = store.reset(list(known) if source_ids else None)
+        if not source_ids:
+            store.reset_monitors()
     finally:
         store.close()
 
@@ -180,6 +205,72 @@ def _reset(settings: Settings, source_ids: list[str] | None, assume_yes: bool) -
     ui.info("Следующий боевой запуск поведёт себя как самый первый: по каждому списку релизов придёт письмо о самом свежем.")
     ui.info("Одиночные страницы и PDF запоминаются молча; чтобы письмо пришло и по ним, задайте initial_notify: 1 в config/sources.yaml.")
     return 0
+
+
+def _monitor_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    """Файлы проб и журналов: явные из --probes/--logwatch, иначе probes.yaml и logwatch.yaml рядом с файлом источников."""
+    base = Path(args.config).parent
+    return Path(getattr(args, "probes", None) or base / "probes.yaml"), Path(getattr(args, "logwatch", None) or base / "logwatch.yaml")
+
+
+def _load_monitors(args: argparse.Namespace, store: Store):
+    """Проверки API и журнала, которые есть в конфигурации. Возвращает (список проверок, ошибка конфигурации или None)."""
+    probes_path, logs_path = _monitor_paths(args)
+    monitors = []
+    try:
+        if probes_path.is_file():
+            probes = load_probes(probes_path)
+            if probes.probes:
+                monitors.append(("Контрольные вызовы API", lambda: run_probes(probes, store)))
+        if logs_path.is_file():
+            logs = load_logwatch(logs_path)
+            if logs:
+                monitors.append(("Журнал интеграции", lambda: run_logwatch(logs, store)))
+    except ConfigError as e:
+        return [], str(e)
+    return monitors, None
+
+
+def _monitor_command(args: argparse.Namespace, settings: Settings, kind: str) -> int:
+    """probes / logwatch: показать, что нашлось; сохранять только с --save."""
+    probes_path, logs_path = _monitor_paths(args)
+    path = probes_path if kind == "probes" else logs_path
+    if not path.is_file():
+        ui.fail(f"файла {path} нет — проверять нечего. Шаблон лежит в config/ вместе с sources.yaml.")
+        return 2
+    store = Store(settings.db_path)
+    try:
+        if kind == "probes":
+            config = load_probes(path)
+            if not config.probes:
+                ui.warn(f"в {path} нет ни одной пробы")
+                return 0
+            result: MonitorResult = run_probes(config, store)
+        else:
+            specs = load_logwatch(path)
+            if not specs:
+                ui.warn(f"в {path} нет ни одного журнала")
+                return 0
+            result = run_logwatch(specs, store)
+        ui.title("Что проверено")
+        for note in result.notes:
+            ui.info(note)
+        ui.title("Сигналы")
+        if not result.signals:
+            ui.ok("тревожных изменений нет")
+        for signal in result.signals:
+            ui.warn(f"[{signal.level}] {signal.title}: {signal.message}")
+        if args.save:
+            result.commit()
+            ui.ok("состояние сохранено: в следующий раз сравнение пойдёт с сегодняшним")
+        else:
+            ui.info("Ничего не сохранено. Чтобы запомнить сегодняшнее состояние как исходное, добавьте --save (иначе это сделает боевой запуск).")
+        return 0
+    except ConfigError as e:
+        ui.fail(str(e))
+        return 2
+    finally:
+        store.close()
 
 
 def _select_sources(config: str, wanted: list[str] | None, *, include_disabled: bool = False) -> list[Source] | None:
@@ -223,7 +314,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_schedule(args.schedule_command, getattr(args, "time", DEFAULT_TIME), args.log_file)
 
     if args.command == "doctor":
-        return doctor(settings, args.config, args.env, online=not args.offline)
+        return doctor(settings, args.config, args.env, online=not args.offline, monitor_paths=_monitor_paths(args))
+
+    if args.command in ("probes", "logwatch"):
+        return _monitor_command(args, settings, args.command)
 
     if args.command == "test-llm":
         return _test_llm(settings)
@@ -267,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ошибка конфигурации: {e}", file=sys.stderr)
         return 2
     if scope.interests:
-        log.info("Тема писем: %s (общие изменения: %s)", scope.interests, "берём" if scope.include_general else "не берём")
+        log.info("Тема писем: %s (общие изменения: %s)", scope.interests, "берём" if scope.include_general else "не берём, только по теме")
     analyzer = NullAnalyzer() if args.no_llm else Analyzer.from_settings(settings, scope)
 
     def mailer(subject: str, text: str, html_body: str) -> None:
@@ -275,6 +369,11 @@ def main(argv: list[str] | None = None) -> int:
         send_email(settings, subject, text, html_body)
 
     store = Store(settings.db_path)
+    monitors, monitor_error = ([], None) if args.no_monitors else _load_monitors(args, store)
+    if monitor_error:
+        store.close()
+        print(f"Ошибка конфигурации: {monitor_error}", file=sys.stderr)
+        return 2
     try:
         report = run(
             sources,
@@ -284,6 +383,7 @@ def main(argv: list[str] | None = None) -> int:
             mailer=mailer,
             settings=settings,
             scope=scope,
+            monitors=monitors,
             dry_run=args.dry_run,
         )
     except MailError as e:

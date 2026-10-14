@@ -14,8 +14,10 @@ from . import __version__, ui
 from .config import ConfigError, Settings, load_scope, load_sources
 from .extract import extract_document, extract_links, parse_telegram
 from .fetch import FetchError
+from .logwatch import expand_paths, load_logwatch
 from .models import Source
 from .pipeline import PageFetcher, SourceError, discover, fetch_record
+from .probes import load_probes, prepare
 from .robots import GuardedFetcher, RobotsPolicy
 from .store import Store
 
@@ -37,7 +39,58 @@ def _host_port(url: str) -> tuple[str, int]:
     return parts.hostname or "", parts.port or (443 if parts.scheme == "https" else 80)
 
 
-def doctor(settings: Settings, config_path: str, env_path: str, online: bool = True) -> int:
+def _doctor_monitors(probes_path: Path, logs_path: Path) -> int:
+    """Контрольные вызовы API и журналы интеграции: файлы есть, переменные заданы, журналы находятся."""
+    fails = 0
+    ui.title("Контрольные вызовы API")
+    if not probes_path.is_file():
+        ui.info(f"{probes_path} нет — контрольных вызовов API не будет (шаблон: config/probes.yaml)")
+    else:
+        try:
+            config = load_probes(probes_path)
+            ready = 0
+            for probe in config.probes:
+                prepared = prepare(probe, os.environ)
+                if isinstance(prepared, str):
+                    ui.warn(f"{probe.id}: {prepared}")
+                else:
+                    ready += 1
+                    note = "" if prepared.mode == "full" else " (без токена)"
+                    ui.ok(f"{probe.id}: {probe.method} {prepared.host}{note}")
+            ui.info(f"проб в файле {len(config.probes)}, готово к запуску {ready}")
+            if config.token_command:
+                ui.info("токен получается командой из probes.yaml (token.command)")
+            elif not os.environ.get(config.token_var):
+                ui.info(f"{config.token_var} не задан: методы с авторизацией проверяются без токена (видно статус и текст ошибки)")
+        except ConfigError as e:
+            fails += 1
+            ui.fail(str(e))
+
+    ui.title("Журнал интеграции")
+    if not logs_path.is_file():
+        ui.info(f"{logs_path} нет — журнал читаться не будет (шаблон: config/logwatch.yaml)")
+    else:
+        try:
+            for spec in load_logwatch(logs_path):
+                files = expand_paths(spec)
+                if files:
+                    ui.ok(f"{spec.id}: найдено файлов {len(files)}, например {files[0]}")
+                else:
+                    ui.warn(f"{spec.id}: по путям {', '.join(spec.paths)} файлов нет — проверьте пути в logwatch.yaml")
+                ui.info("ищем: " + ", ".join(s.name for s in spec.signatures))
+        except ConfigError as e:
+            fails += 1
+            ui.fail(str(e))
+    return fails
+
+
+def doctor(
+    settings: Settings,
+    config_path: str,
+    env_path: str,
+    online: bool = True,
+    monitor_paths: tuple[Path, Path] | None = None,
+) -> int:
     """Проверяет всё, что нужно для запуска. Возвращает 1, если есть критичные проблемы."""
     fails = 0
 
@@ -99,14 +152,18 @@ def doctor(settings: Settings, config_path: str, env_path: str, online: bool = T
         ui.ok(f"{config_path}: источников {len(sources)}, включено {len(enabled)}")
         for s in sources:
             mark = "" if s.enabled else "  [ВЫКЛЮЧЕН: enabled: false]"
-            ui.info(f"- {s.id} [{s.type}] {s.url}{mark}")
+            pdf = "  +PDF по ссылкам" if s.follow_pdf else ""
+            ui.info(f"- {s.id} [{s.type}] {s.url}{pdf}{mark}")
             if s.link_pattern:
                 ui.info(f"    шаблон ссылок: {s.link_pattern}")
         if len(enabled) < len(sources):
-            ui.info("Выключенные источники проверяются пунктом «Проверка источников»; включить — убрать enabled: false.")
+            ui.warn("Есть выключенные источники (enabled: false): они не участвуют в запуске. Включите или удалите их.")
     except ConfigError as e:
         fails += 1
         ui.fail(str(e))
+
+    if monitor_paths:
+        fails += _doctor_monitors(*monitor_paths)
 
     ui.title("Состояние (база данных)")
     db_path = Path(settings.db_path)
@@ -162,7 +219,8 @@ def doctor(settings: Settings, config_path: str, env_path: str, online: bool = T
 
 
 def _preview(source: Source, url: str, fetcher: PageFetcher) -> None:
-    record = fetch_record(source, url, fetcher)
+    pdf_links: list[str] | None = [] if source.follow_pdf else None
+    record = fetch_record(source, url, fetcher, pdf_links=pdf_links)
     lines = record.text.splitlines()
     ui.ok(f"документ: {url}")
     ui.info(f"заголовок: {record.title}")
@@ -175,6 +233,12 @@ def _preview(source: Source, url: str, fetcher: PageFetcher) -> None:
     if len(lines) > PREVIEW_LINES:
         ui.info(f"  | ... ещё строк: {len(lines) - PREVIEW_LINES}")
     ui.info("Если здесь попало меню сайта или баннеры — задайте content_selector; счётчики — ignore_regex.")
+    if pdf_links is not None:
+        if pdf_links:
+            ui.ok(f"PDF-ссылок на странице: {len(pdf_links)} (будут прочитаны первые {source.max_pdf_links}, каждый как отдельный документ)")
+            _show_links(pdf_links)
+        else:
+            ui.warn("follow_pdf включён, но PDF-ссылок в основном блоке страницы нет (проверьте content_selector и pdf_pattern)")
 
 
 def _show_links(links: list[str]) -> None:

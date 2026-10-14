@@ -17,19 +17,30 @@
 #   id               — уникальный идентификатор (латиница), по нему хранится состояние
 #   name             — название для писем
 #   url              — адрес страницы / списка / sitemap / файла
-#   enabled          — false: источник не участвует в запуске, но его можно проверить пунктом 2 меню (по умолчанию true)
 #   robots           — respect | warn | off: как относиться к robots.txt сайта для этого источника
 #                      (по умолчанию как в .env, SITEWATCH_ROBOTS=respect: запрещённое не загружается)
 #   focus            — что важно читателю; подсказка агенту-аналитику
 #   content_selector — CSS-селектор основного текста (если не задан, берётся main/article/body)
 #   ignore_regex     — список регулярных выражений: совпавшие строки текста игнорируются (счётчики, даты и т.п.)
 #                      Для PDF номера страниц и колонтитулы убираются сами.
+#   follow_pdf       — true: PDF, на которые ссылается страница (в её основном блоке, не в меню и подвале),
+#                      читаются как отдельные документы: новый PDF = новый документ, правка PDF = обновление.
+#                      Для list/sitemap это относится к каждой странице-документу.
+#   pdf_pattern      — какие PDF-ссылки брать (регулярное выражение; по умолчанию любые, оканчивающиеся на .pdf).
+#                      Если задан, расширение .pdf не обязательно: подойдёт и ссылка вида /download?id=12.
+#   max_pdf_links    — сколько PDF-ссылок с одной страницы обрабатывать (по умолчанию 5)
+#   enabled          — false: временно исключить источник из запуска (по умолчанию true)
 # Для list/sitemap/telegram:
 #   link_pattern     — регулярное выражение для ссылок на документы (обязательно для list и sitemap)
 #   recheck_latest   — сколько последних известных документов перепроверять на правки (по умолчанию 0)
 #   initial_notify   — сколько самых свежих документов прислать при первом запуске (по умолчанию 1);
 #                      остальные запоминаются молча, чтобы не засыпать почту архивом
 #   max_new_per_run  — защита от лавины: максимум новых документов за запуск (по умолчанию 10)
+#
+# Адреса источников ниже взяты из поиска: с облачной среды сайты недоступны, проверить их там нельзя.
+# Перед первым боевым запуском выполните пункт 2 меню (или «run.bat check-sources»): он покажет, видит ли парсер
+# ссылки и нормальный текст. Источник, который не читается, удалите или поправьте link_pattern. Если источник
+# перестанет читаться позже, на третий запуск подряд в письме придёт предупреждение.
 
 # Что нужно читателю. Агент выписывает из документов только это; документ, где ничего подходящего нет,
 # в письмо не попадает (в конце письма перечислено, что отфильтровано, чтобы заметить ошибку фильтра).
@@ -38,85 +49,117 @@ scope:
     Мясо и мясная продукция (птица, колбасы, полуфабрикаты, субпродукты), рыба и рыбная продукция
     (икра, пресервы, морепродукты), мясные и рыбные консервы; ветеринарные сопроводительные документы
     и система «Меркурий» (ВетИС) в части мяса и рыбы.
-  # Брать ли общие изменения, которые касаются всех товарных групп (API, авторизация, форматы, отчёты, коды):
-  # они затрагивают и вашу интеграцию. false — присылать только то, что прямо про мясо и рыбу.
-  include_general: true
+  # false — в письмо попадает только то, что прямо про мясо и рыбу. Общие изменения для всех товарных групп
+  # (авторизация, формат запросов, смена хостов API) в письмо не идут: за ними следят контрольные вызовы API
+  # и счётчики журнала (probes.yaml, logwatch.yaml), которые срабатывают независимо от товарной группы.
+  # true — присылать и общие изменения тоже.
+  include_general: false
   # Таблица «метод API или термин -> где менять в вашей системе» (шаблон лежит рядом). Если файла нет,
   # уберите эту строку: письмо будет отвечать на «что изменилось», но не на «где править».
   glossary: config/glossary.yaml
 
 sources:
+  # Главный источник: «Что нового в системе» на сайте Честного ЗНАКа. К релизам прикладывают PDF с описанием
+  # изменений, их читаем отдельно.
   - id: chestny-znak-releases
     name: "Честный ЗНАК — «Что нового в системе»"
     type: list
     url: https://xn--80ajghhoc2aj1c8b.xn--p1ai/info/releasenotes/
     link_pattern: '/info/releasenotes/chto-novogo-[^/?#]+/?$'
+    follow_pdf: true
     focus: >
-      Изменения для участников оборота и интеграторов по мясу и рыбе, а также общие: требования и сроки,
-      изменения в API и форматах обмена данными, исправленные ошибки, влияющие на интеграции.
+      Изменения по мясу, рыбе, консервам и ветеринарным документам: требования и сроки, изменения в API и форматах
+      обмена данными, отчёты о нанесении, вес и усушка, исправленные ошибки, влияющие на интеграции.
     recheck_latest: 3
     initial_notify: 1
 
-  # --- Ниже источники из подборки. Все выключены: адреса выведены из поиска и не проверены (с облачной среды сайты
-  # --- недоступны). Проверьте каждый командой «run.bat check-sources --source ID» (или пунктом 2 меню: он показывает
-  # --- и выключенные), убедитесь, что парсер видит ссылки и нормальный текст, и только потом уберите enabled: false.
-
-  # Сообщество разработчиков: вопросы и ошибки API (разбор ошибок авторизации, токенов и т.п.).
-  - id: markirovka-developers
-    name: "markirovka.ru — сообщество разработчиков (API и ошибки)"
-    type: list
-    url: https://markirovka.ru/community/developers
-    link_pattern: '/community/developers/[^/?#]+/?$'
-    enabled: false
-    max_new_per_run: 10
-    focus: >
-      Ошибки и изменения поведения API: новые тексты ошибок, коды ответов, отключённые методы, смена хостов
-      и схем ответа. Вопросы без ответа по существу не важны.
-
-  # Разделы markirovka.ru по группам «мясо» и «консервы»: впишите адреса разделов, раскомментируйте и проверьте.
-  # - id: markirovka-myaso
-  #   name: "markirovka.ru — мясная продукция"
-  #   type: list
-  #   url: <адрес раздела на markirovka.ru>
-  #   link_pattern: '<шаблон ссылок на статьи этого раздела>'
-  #   enabled: false
-
+  # Новости партнёра Честного ЗНАКа: объясняют, что и к какому сроку меняется для мяса, рыбы и консервов.
   - id: kontur-markirovka-news
     name: "Контур.Маркировка — новости"
     type: list
     url: https://kontur.ru/markirovka/news
     link_pattern: '/markirovka/news/\d+-[^/?#]+'
-    enabled: false
     focus: Правила и сроки маркировки мяса, рыбы и консервов, изменения в работе с системой.
+    initial_notify: 2
 
   - id: kontur-mercury-news
     name: "Контур.Меркурий — новости"
     type: list
     url: https://kontur.ru/mercury/news
     link_pattern: '/mercury/news/\d+-[^/?#]+'
-    enabled: false
     focus: Изменения в ФГИС «Меркурий» и ВСД, API шлюза, требования к оформлению документов по мясу и рыбе.
+    initial_notify: 2
 
-  # Справка ВетИС (help.vetrf.ru) похожа на MediaWiki, поэтому следим за страницей «Последние изменения».
-  # Адрес предположительный: если на сайте другая вики или нет такой страницы, проверка покажет это.
-  - id: vetis-help-changes
-    name: "Помощь Меркурия (ВетИС) — последние изменения справки"
-    type: page
-    url: https://help.vetrf.ru/index.php?title=Special:RecentChanges&days=14&limit=100&hidebots=1
-    enabled: false
-    focus: Изменения в справке по ВСД, Меркурию и API ВетИС.
+  # Раздел «База знаний» на markirovka.ru по товарным группам: инструкции и разъяснения, к ним прикладывают PDF.
+  # Архив при первом запуске запоминается молча (initial_notify: 0), в письмо идут новые и правленые статьи.
+  - id: markirovka-kb-myaso
+    name: "markirovka.ru — база знаний: мясо и мясные изделия"
+    type: list
+    url: https://markirovka.ru/knowledge/tovarnye-gruppy/myaso-i-myasnye-izdeliya
+    link_pattern: '/knowledge/tovarnye-gruppy/myaso-i-myasnye-izdeliya/[^/?#]+/?$'
+    follow_pdf: true
+    max_pdf_links: 3
+    recheck_latest: 5
+    initial_notify: 0
+    focus: "Порядок работы с мясной продукцией в системе маркировки: коды, отчёты, документы, сроки, вес."
 
-  # Канал уведомлений по МДЛП (лекарства). Для мяса и рыбы там нужно разве что общее: технические работы, API.
-  # Фильтр по теме отсеет остальное. Нужен адрес именно вида t.me/s/...
-  - id: mdlp-telegram
-    name: "Telegram: oms_mdlp_notif (уведомления МДЛП)"
-    type: telegram
-    url: https://t.me/s/oms_mdlp_notif
-    enabled: false
+  - id: markirovka-kb-konservy
+    name: "markirovka.ru — база знаний: консервы"
+    type: list
+    url: https://markirovka.ru/knowledge/tovarnye-gruppy/otdelnye-vidy-konservirovannyx-produktov/
+    link_pattern: '/knowledge/tovarnye-gruppy/otdelnye-vidy-konservirovannyx-produktov/[^/?#]+/?$'
+    follow_pdf: true
+    max_pdf_links: 3
+    recheck_latest: 5
+    initial_notify: 0
+    focus: Порядок работы с мясными и рыбными консервами в системе маркировки; остальные консервы не нужны.
+
+  - id: markirovka-kb-ikra
+    name: "markirovka.ru — база знаний: икра и морепродукты"
+    type: list
+    url: https://markirovka.ru/knowledge/tovarnye-gruppy/ikra-lasosevyh-ryb/
+    link_pattern: '/knowledge/tovarnye-gruppy/ikra-lasosevyh-ryb/[^/?#]+/?$'
+    follow_pdf: true
+    max_pdf_links: 3
+    recheck_latest: 5
+    initial_notify: 0
+    focus: "Порядок работы с икрой и морепродуктами в системе маркировки: коды, отчёты, документы, сроки."
+
+  # Раздел «Сообщество» на markirovka.ru: статьи самого Честного ЗНАКа по товарным группам (этапы, сроки, инструкции).
+  - id: markirovka-community-myaso
+    name: "markirovka.ru — статьи: мясная продукция, полуфабрикаты"
+    type: list
+    url: https://markirovka.ru/community/markirovka-myasnykh-izdeliy-polufabrikatov-i-zamorozhennoy-produktsii
+    link_pattern: '/community/markirovka-myasnykh-izdeliy-polufabrikatov-i-zamorozhennoy-produktsii/[^/?#]+/?$'
+    follow_pdf: true
+    max_pdf_links: 3
     recheck_latest: 3
-    initial_notify: 1
+    initial_notify: 0
+    focus: Этапы и сроки маркировки мяса, полуфабрикатов и замороженной продукции, инструкции для участников оборота.
 
-  # --- Закомментированные примеры ---
+  - id: markirovka-community-konservy
+    name: "markirovka.ru — статьи: консервированная продукция"
+    type: list
+    url: https://markirovka.ru/community/markirovka-konservirovannykh-produktov
+    link_pattern: '/community/markirovka-konservirovannykh-produktov/[^/?#]+/?$'
+    follow_pdf: true
+    max_pdf_links: 3
+    recheck_latest: 3
+    initial_notify: 0
+    focus: Этапы и сроки маркировки мясных и рыбных консервов, инструкции; другие консервы не нужны.
+
+  - id: markirovka-community-ikra
+    name: "markirovka.ru — статьи: икра и морепродукты"
+    type: list
+    url: https://markirovka.ru/community/markirovka-ikry
+    link_pattern: '/community/markirovka-ikry/[^/?#]+/?$'
+    follow_pdf: true
+    max_pdf_links: 3
+    recheck_latest: 3
+    initial_notify: 0
+    focus: Этапы и сроки маркировки икры и морепродуктов, инструкции для участников оборота.
+
+  # --- Примеры (раскомментируйте и подставьте свои адреса) ---
 
   # PDF-документ, например спецификация API. Адрес проверьте пунктом 2 меню («что видит парсер»).
   # Первый запуск запоминает его молча (initial_notify по умолчанию 0), дальше присылается разбор правок.
@@ -135,17 +178,10 @@ sources:
   #   url: file:///C:/specs/trueapi-openapi.json
   #   focus: Какие методы, поля и ответы появились, изменились или исчезли.
 
-  # Страница со списком PDF: каждый новый PDF — новый документ, правка существующего — обновление.
-  # - id: some-docs-list
+  # Страница, на которой лежат PDF-руководства: каждый новый PDF — новый документ, правка существующего — обновление.
+  # - id: some-docs-page
   #   name: "Документы на сайте"
-  #   type: list
-  #   url: https://example.com/docs/
-  #   link_pattern: '\.pdf$'
-
-  # Пример одиночной страницы:
-  # - id: some-requirements-page
-  #   name: "Требования к ..."
   #   type: page
-  #   url: https://example.com/requirements/
-  #   content_selector: "main .content"
-  #   ignore_regex: ['^Просмотров: \d+']
+  #   url: https://example.com/docs/
+  #   follow_pdf: true
+  #   pdf_pattern: '/upload/.*\.pdf$'   # необязательно: брать только такие ссылки

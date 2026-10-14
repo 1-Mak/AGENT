@@ -11,12 +11,10 @@ from tests.helpers import make_change
 
 GOOD = {
     "summary": "Срок перехода перенесён на 1 июля 2026.",
-    "key_changes": ["перенос срока"],
-    "who_is_affected": "участники оборота",
+    "affected_methods": ["отчёт о нанесении"],
     "deadlines": ["01.07.2026 — переход"],
     "required_actions": [],
     "importance": "высокая",
-    "importance_reason": "изменён обязательный срок",
 }
 
 
@@ -102,12 +100,13 @@ def test_thinking_mode_can_be_enabled_with_bigger_budget():
 
 
 def test_model_sloppiness_is_forgiven():
-    sloppy = {"summary": "Кратко", "importance": " Высокая ", "key_changes": None, "deadlines": "до 1 июля", "who_is_affected": None}
+    sloppy = {"summary": "Кратко", "importance": " Высокая ", "affected_methods": None, "deadlines": "до 1 июля",
+              "key_changes": ["поле из старой версии формата"], "who_is_affected": "лишнее поле"}
     fenced = "```json\n" + json.dumps(sloppy, ensure_ascii=False) + "\n```"
     result = make_analyzer(completion(fenced))[0].analyze(make_change())
     assert result.importance == "высокая"
-    assert result.key_changes == [] and result.deadlines == ["до 1 июля"]
-    assert result.who_is_affected == "не указано" and result.required_actions == []
+    assert result.affected_methods == [] and result.deadlines == ["до 1 июля"] and result.required_actions == []
+    assert not hasattr(result, "key_changes")  # лишние поля старого формата отбрасываются, а не ломают разбор
 
 
 def test_empty_content_is_retried_once():

@@ -9,36 +9,33 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class Analysis(BaseModel):
-    """Структурированный разбор изменения — его заполняет агент-аналитик.
+    """Краткий разбор изменения для письма: что изменилось, где менять, как менять, к какому сроку.
 
     Валидаторы прощают типичные огрехи языковой модели (null вместо пустого списка,
     «Высокая» с заглавной буквы), чтобы не терять разбор из-за мелочей формата.
     """
 
-    summary: str = Field(description="Суть изменения в 2-4 предложениях.")
-    key_changes: list[str] = Field(
-        default_factory=list, description="Конкретные изменения по пунктам: что добавили, убрали, поменяли."
-    )
-    who_is_affected: str = Field(
-        default="не указано", description="Кого касается изменение. Если в тексте не сказано — «не указано»."
-    )
-    deadlines: list[str] = Field(
+    summary: str = Field(description="Что изменилось: 1-2 коротких предложения только по теме читателя.")
+    affected_methods: list[str] = Field(
         default_factory=list,
-        description="Сроки и даты вступления в силу с пояснением, к чему они относятся. Пусто, если сроков нет.",
+        description="Где менять: методы API, форматы, отчёты и другие объекты из текста, которых касается изменение.",
     )
     required_actions: list[str] = Field(
         default_factory=list,
-        description="Что нужно сделать читателю согласно тексту документа. Пусто, если не указано.",
+        description="Как менять: короткие шаги, что сделать. Пусто, если в тексте не указано.",
     )
+    deadlines: list[str] = Field(
+        default_factory=list,
+        description="Сроки с пояснением, к чему они относятся («01.09.2026 — переход на новый хост»). Пусто, если сроков нет.",
+    )
+    nearest_deadline: str = Field(default="", description="Ближайший срок, который нужно учесть, как ДД.ММ.ГГГГ. Пусто, если сроков нет.")
     importance: Literal["высокая", "средняя", "низкая"] = Field(description="Важность изменения для читателя.")
-    importance_reason: str = Field(default="", description="Одно предложение: почему выбрана такая важность.")
     relevance: Literal["прямо", "общее", "не относится"] = Field(
-        default="общее",
+        default="прямо",  # если модель забыла поле, документ не прячем: отсев по теме только по её явному решению
         description="«прямо» — есть изменения по теме читателя; «общее» — касается всех товарных групп или системы "
         "в целом; «не относится» — только про другие товарные группы.",
     )
     relevance_note: str = Field(default="", description="Одна фраза: что отобрано из документа или почему он не относится к теме.")
-    nearest_deadline: str = Field(default="", description="Ближайший срок, который нужно учесть, как ДД.ММ.ГГГГ. Пусто, если сроков нет.")
     affected_components: list[str] = Field(
         default_factory=list, description="Названия записей из таблицы соответствий, которых касается изменение."
     )
@@ -58,7 +55,7 @@ class Analysis(BaseModel):
     def _deadline_text(cls, value):
         return "" if value is None else str(value).strip()
 
-    @field_validator("key_changes", "deadlines", "required_actions", "affected_components", mode="before")
+    @field_validator("affected_methods", "deadlines", "required_actions", "affected_components", mode="before")
     @classmethod
     def _as_list(cls, value):
         if value is None:
@@ -66,11 +63,6 @@ class Analysis(BaseModel):
         if isinstance(value, str):
             return [value] if value.strip() else []
         return value
-
-    @field_validator("who_is_affected", mode="before")
-    @classmethod
-    def _affected_default(cls, value):
-        return "не указано" if value is None or value == "" else value
 
     @field_validator("importance", mode="before")
     @classmethod
@@ -93,6 +85,9 @@ class Source:
     max_new_per_run: int = 10
     enabled: bool = True  # выключенный источник не участвует в run, но его можно проверить через check-sources
     robots: str = ""  # respect | warn | off; пусто — как в настройках (SITEWATCH_ROBOTS)
+    follow_pdf: bool = False  # PDF по ссылкам со страниц источника читать как отдельные документы
+    pdf_pattern: str | None = None  # регулярное выражение: какие PDF-ссылки брать (по умолчанию все)
+    max_pdf_links: int = 5  # сколько PDF-ссылок с одной страницы обрабатывать
 
 
 @dataclass(frozen=True)
@@ -109,7 +104,7 @@ class Scope:
     """Что нужно читателю. Пустые interests — фильтра нет, присылается всё найденное."""
 
     interests: str = ""
-    include_general: bool = True  # общие изменения (API, авторизация, форматы) касаются и вашей темы
+    include_general: bool = False  # True — брать и общие изменения (API, авторизация, форматы), не только про вашу тему
     glossary: tuple[GlossaryEntry, ...] = ()
 
 
@@ -130,5 +125,6 @@ class Change:
     record: DocRecord
     kind: str  # "new" | "updated"
     diff: str = ""
+    found_on: str = ""  # для PDF по ссылке: адрес страницы, на которой файл найден
     truncated: bool = False  # текст документа не поместился в запрос к агенту целиком
     analysis: Analysis | None = None

@@ -76,12 +76,10 @@ class FakeFetcher:
 def make_analysis(importance: str = "высокая") -> Analysis:
     return Analysis(
         summary="Сроки сдвинуты.",
-        key_changes=["перенос срока"],
-        who_is_affected="розница",
+        affected_methods=["POST /cises/info"],
         deadlines=["до 01.07.2026 — переход"],
         required_actions=["обновить интеграцию"],
         importance=importance,
-        importance_reason="меняет срок",
     )
 
 
@@ -92,13 +90,15 @@ def make_change(text="Текст документа", kind="new", diff="", title
 
 class FakeAnalyzer:
     def __init__(self, importance: str = "средняя", disabled_reason: str | None = None, relevance: str = "прямо",
-                 relevance_by_title: dict[str, str] | None = None, components: tuple[str, ...] = (), deadline: str = ""):
+                 relevance_by_title: dict[str, str] | None = None, components: tuple[str, ...] = (), deadline: str = "",
+                 methods: tuple[str, ...] = ()):
         self.importance = importance
         self.disabled_reason = disabled_reason
         self.relevance = relevance
         self.relevance_by_title = relevance_by_title or {}
         self.components = components
         self.deadline = deadline
+        self.methods = methods
         self.seen: list[str] = []
 
     def analyze(self, change):
@@ -106,12 +106,10 @@ class FakeAnalyzer:
         relevance = self.relevance_by_title.get(change.record.title, self.relevance)
         return Analysis(
             summary=f"Разбор: {change.record.title}",
-            key_changes=["изменение 1"],
-            who_is_affected="участники оборота",
+            affected_methods=list(self.methods),
             deadlines=[],
             required_actions=[],
             importance=self.importance,
-            importance_reason="тест",
             relevance=relevance,
             relevance_note=f"отбор: {relevance}",
             nearest_deadline=self.deadline,

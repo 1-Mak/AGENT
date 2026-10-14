@@ -83,6 +83,33 @@ def parse_sitemap(xml_text: str) -> tuple[bool, list[tuple[str, str]]]:
     return is_index, entries
 
 
+def _content_root(soup: BeautifulSoup, selector: str | None):
+    """Основной блок страницы без меню, подвала и прочего оформления."""
+    root = soup.select_one(selector) if selector else None
+    if root is None:
+        root = soup.find("main") or soup.find("article") or soup.find(attrs={"role": "main"}) or soup.body or soup
+    for tag in root.find_all(_DROP_TAGS):
+        tag.decompose()
+    return root
+
+
+def extract_pdf_links(html: str, base_url: str, selector: str | None = None, pattern: str | None = None) -> list[str]:
+    """Ссылки на PDF в основном блоке страницы (не в меню и подвале), без дублей, в порядке появления.
+    pattern — регулярное выражение: если задано, берутся только подходящие ссылки, и расширение .pdf не обязательно."""
+    rx = re.compile(pattern) if pattern else None
+    root = _content_root(BeautifulSoup(html, "lxml"), selector)
+    found: list[str] = []
+    for a in root.find_all("a", href=True):
+        href = a["href"].strip()
+        if href.startswith(("mailto:", "tel:", "javascript:", "#")):
+            continue
+        url = normalize_url(urljoin(base_url, href))
+        if url in found or not (rx.search(url) if rx else is_pdf_url(url)):
+            continue
+        found.append(url)
+    return found
+
+
 def extract_document(
     html: str,
     base_url: str,
@@ -99,14 +126,7 @@ def extract_document(
     elif soup.title and soup.title.get_text(strip=True):
         title = soup.title.get_text(" ", strip=True)
 
-    root = None
-    if selector:
-        root = soup.select_one(selector)
-    if root is None:
-        root = soup.find("main") or soup.find("article") or soup.find(attrs={"role": "main"}) or soup.body or soup
-
-    for tag in root.find_all(_DROP_TAGS):
-        tag.decompose()
+    root = _content_root(soup, selector)
 
     # Ссылки на файлы (PDF, Word, Excel) — важная часть документации: показываем адрес рядом с текстом.
     for a in root.find_all("a", href=True):

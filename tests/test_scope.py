@@ -36,10 +36,10 @@ T13 = "Что нового в системе с 13.04.2026"
 
 def test_system_prompt_carries_topic_glossary_and_new_fields():
     prompt = build_system_prompt(MEAT)
-    assert "Тема, которая интересует читателя: Мясо и рыба" in prompt
+    assert "Тема, которая интересует читателя, и только она: Мясо и рыба" in prompt
     assert "«не относится»" in prompt and "relevance_note" in prompt
     assert "<glossary>" in prompt and "- Авторизация и токен: авторизация, токен" in prompt
-    assert "nearest_deadline" in prompt and '"affected_components": [\n    "Авторизация и токен"\n  ]' in prompt
+    assert "nearest_deadline" in prompt and "affected_methods" in prompt and "required_actions" in prompt
 
 
 def test_prompt_without_scope_has_no_topic_filter():
@@ -52,7 +52,7 @@ def test_general_changes_can_be_switched_off_in_the_prompt():
     on = build_system_prompt(Scope(interests="Мясо", include_general=True))
     off = build_system_prompt(Scope(interests="Мясо", include_general=False))
     assert "касается всех товарных групп" in on
-    assert "значение «общее» не используй" in off and "касается всех товарных групп и системы" not in off
+    assert "Значение «общее» не используй" in off and "касается всех товарных групп и системы" not in off
 
 
 def test_analyzer_sends_scope_prompt_and_keeps_only_known_components():
@@ -148,7 +148,7 @@ def test_subject_shows_deadline_and_affected_components():
     change.analysis.affected_components = ["Авторизация и токен"]
     subject, text, html_body = render([change], [], scope=MEAT)
     assert subject == "[Мониторинг] срок: 01.09.2026, затронуто: авторизация и токен — Новый срок по токенам"
-    assert "Что менять в системе:" in text and "Авторизация и токен → обработка ПолучитьТокен в ТАЛАРИКС MES" in text
+    assert "Где:" in text and "Авторизация и токен → обработка ПолучитьТокен в ТАЛАРИКС MES" in text
     assert "Авторизация и токен" in html_body
 
     only_deadline = make_change(title="Срок")
@@ -169,8 +169,8 @@ def test_component_without_where_is_shown_by_name_only_and_topic_label_appears()
     change.analysis.relevance = "общее"
     change.analysis.relevance_note = "отобраны пункты про общие форматы"
     _, text, _ = render([change], [], scope=scope)
-    assert " - Отчёт о нанесении\n" in text and "→" not in text
-    assert "общее изменение" in text and "Отбор по теме: отобраны пункты про общие форматы" in text
+    assert "- Отчёт о нанесении\n" in text and "→" not in text
+    assert "общее изменение" in text
 
 
 # --- конфигурация ---
@@ -207,5 +207,20 @@ def test_shipped_config_is_valid_and_meat_and_fish_focused():
     root = Path(__file__).resolve().parent.parent / "config" / "sources.yaml"
     scope, sources = load_scope(root), load_sources(root)
     assert "Мясо" in scope.interests and "рыба" in scope.interests and len(scope.glossary) >= 5
-    assert [s.id for s in sources if s.enabled] == ["chestny-znak-releases"]  # непроверенные адреса выключены
-    assert {s.type for s in sources} >= {"list", "page", "telegram"}
+    assert scope.include_general is False and all(s.enabled for s in sources)  # только мясо и рыба; выключенных источников нет
+
+
+def test_missing_relevance_from_the_model_does_not_hide_a_document_under_strict_scope():
+    answer = {"summary": "Новый срок", "importance": "высокая"}  # модель забыла relevance
+    session = FakeSession(completion(json.dumps(answer, ensure_ascii=False)))
+    analysis = Analyzer("sk", session=session, scope=Scope(interests="Мясо", include_general=False)).analyze(make_change())
+    assert analysis.relevance == "прямо"
+
+    class Forgetful:
+        disabled_reason = None
+
+        def analyze(self, change):
+            return analysis
+
+    report, _ = do_run(Forgetful(), Scope(interests="Мясо", include_general=False), Mailbox())
+    assert len(report.changes) == 2 and report.filtered == []

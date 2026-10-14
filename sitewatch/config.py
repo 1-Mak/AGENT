@@ -144,6 +144,13 @@ def load_sources(path: str | Path) -> list[Source]:
                 except re.error as e:
                     raise ConfigError(f"{where}: некорректное регулярное выражение {rx!r}: {e}") from e
 
+        pdf_pattern = raw.get("pdf_pattern")
+        if pdf_pattern:
+            try:
+                re.compile(pdf_pattern)
+            except re.error as e:
+                raise ConfigError(f"{where}: некорректное регулярное выражение pdf_pattern {pdf_pattern!r}: {e}") from e
+
         robots = str(raw.get("robots") or "").lower()
         if robots not in VALID_ROBOTS:
             raise ConfigError(f"{where}: robots должен быть respect, warn или off (получено: {robots!r})")
@@ -163,6 +170,9 @@ def load_sources(path: str | Path) -> list[Source]:
                 max_new_per_run=int(raw.get("max_new_per_run", 10)),
                 enabled=bool(raw.get("enabled", True)),
                 robots=robots,
+                follow_pdf=bool(raw.get("follow_pdf", False)),
+                pdf_pattern=pdf_pattern or None,
+                max_pdf_links=int(raw.get("max_pdf_links", 5)),
             )
         )
     return sources
@@ -211,6 +221,6 @@ def load_scope(path: str | Path) -> Scope:
         glossary = load_glossary(gpath)
     return Scope(
         interests=" ".join(str(block.get("interests") or "").split()),
-        include_general=bool(block.get("include_general", True)),
+        include_general=bool(block.get("include_general", False)),
         glossary=glossary,
     )

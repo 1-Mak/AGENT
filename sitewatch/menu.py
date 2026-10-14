@@ -17,6 +17,8 @@ ACTIONS = [
     ("5", "Пробный запуск: показать письмо, ничего не отправлять и не сохранять", ["run", "--dry-run"], True),
     ("6", "Пробный запуск без DeepSeek", ["run", "--dry-run", "--no-llm"], True),
     ("7", "БОЕВОЙ запуск: отправить письмо и сохранить состояние", ["run"], True),
+    ("12", "Контрольные вызовы API: ответы методов и что изменилось (ничего не сохраняет)", ["probes"], True),
+    ("13", "Журнал интеграции: счётчики ошибок с прошлой проверки (ничего не сохраняет)", ["logwatch"], True),
 ]
 EXTRA = [
     ("8", "Автозапуск раз в сутки: включить / проверить / выключить"),
@@ -32,15 +34,16 @@ def _print_menu(log_file: str) -> None:
     print("\n" + "=" * 70)
     print(" sitewatch — мониторинг обновлений документации")
     print("=" * 70)
-    for key, label, _, _ in ACTIONS:
-        print(f"  {key}  {label}")
-    for key, label in EXTRA:
-        print(f"  {key}  {label}")
+    items = [(key, label) for key, label, _, _ in ACTIONS] + EXTRA
+    order = lambda item: (item[0] == "0", int(item[0]))  # noqa: E731 — по номерам, «0 Выход» в конец
+    for key, label in sorted(items, key=order):
+        print(f"  {key.rjust(2)}  {label}")
     print("-" * 70)
     print(f" Папка: {Path.cwd()}")
     if log_file:
         print(f" Журнал работы: {log_file}")
     print(" Первый раз: пункты 1 -> 2 -> 3 -> 4 -> 5, и только потом 7.")
+    print(" Проверки API и журнала (12, 13) работают после настройки config/probes.yaml и logwatch.yaml.")
 
 
 def _open_env(env_path: str) -> None:
