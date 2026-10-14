@@ -82,13 +82,16 @@ def discover(source: Source, fetcher: PageFetcher) -> list[str]:
 
     # sitemap
     rx = re.compile(source.link_pattern)
-    is_index, entries = parse_sitemap(fetcher.get(source.url))
-    if is_index:
-        children = [loc for loc, _ in entries][:MAX_CHILD_SITEMAPS]
-        entries = []
-        for child in children:
-            _, child_entries = parse_sitemap(fetcher.get(child))
-            entries.extend(child_entries)
+    try:
+        is_index, entries = parse_sitemap(fetcher.get(source.url))
+        if is_index:
+            children = [loc for loc, _ in entries][:MAX_CHILD_SITEMAPS]
+            entries = []
+            for child in children:
+                _, child_entries = parse_sitemap(fetcher.get(child))
+                entries.extend(child_entries)
+    except ExtractError as e:
+        raise SourceError(f"{source.url}: {e}") from e
     entries = [(loc, mod) for loc, mod in entries if rx.search(loc)]
     if entries and all(mod for _, mod in entries):
         entries.sort(key=lambda e: e[1], reverse=True)  # свежие первыми
@@ -306,16 +309,21 @@ def run(
         source_fetcher = GuardedFetcher(fetcher, robots, mode) if mode in ("respect", "warn") else fetcher
         try:
             results.append(check_source(source, source_fetcher, store))
+            continue
         except (SourceError, FetchError) as e:
-            failed += 1
-            log.error("[%s] сбой проверки: %s", source.id, e)
-            if dry_run:
-                continue
-            count = store.record_failure(source.id, str(e))
-            log.error("[%s] сбоев подряд: %d (письмо-алерт при %d)", source.id, count, settings.failure_alert_threshold)
-            if count >= settings.failure_alert_threshold and not store.source_state(source.id).alerted:
-                alerts.append(f"«{source.name}»: {count} запусков подряд не удаётся проверить. Причина: {e}")
-                alerted_ids.append(source.id)
+            reason = str(e)
+            log.error("[%s] сбой проверки: %s", source.id, reason)
+        except Exception as e:  # noqa: BLE001 — непредвиденная ошибка разбора одного источника не должна останавливать остальные
+            reason = f"непредвиденная ошибка разбора ({type(e).__name__}: {e})"
+            log.exception("[%s] сбой проверки: %s", source.id, reason)
+        failed += 1
+        if dry_run:
+            continue
+        count = store.record_failure(source.id, reason)
+        log.error("[%s] сбоев подряд: %d (письмо-алерт при %d)", source.id, count, settings.failure_alert_threshold)
+        if count >= settings.failure_alert_threshold and not store.source_state(source.id).alerted:
+            alerts.append(f"«{source.name}»: {count} запусков подряд не удаётся проверить. Причина: {reason}")
+            alerted_ids.append(source.id)
 
     changes = [c for r in results for c in r.changes]
     for change in changes:

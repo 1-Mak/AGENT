@@ -67,7 +67,10 @@ def extract_links(html: str, base_url: str, pattern: str) -> list[str]:
 
 def parse_sitemap(xml_text: str) -> tuple[bool, list[tuple[str, str]]]:
     """Возвращает (это_индекс_sitemap, [(loc, lastmod), ...])."""
-    root = ET.fromstring(xml_text)
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        raise ExtractError(f"sitemap не читается как XML ({e}): вероятно, сайт отдал страницу ошибки или заглушку") from e
     is_index = root.tag.rsplit("}", 1)[-1] == "sitemapindex"
     entries = []
     for node in root:

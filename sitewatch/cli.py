@@ -213,22 +213,35 @@ def _monitor_paths(args: argparse.Namespace) -> tuple[Path, Path]:
     return Path(getattr(args, "probes", None) or base / "probes.yaml"), Path(getattr(args, "logwatch", None) or base / "logwatch.yaml")
 
 
-def _load_monitors(args: argparse.Namespace, store: Store):
-    """Проверки API и журнала, которые есть в конфигурации. Возвращает (список проверок, ошибка конфигурации или None)."""
+def _load_monitors(args: argparse.Namespace, store: Store) -> list:
+    """Проверки API и журнала, которые есть в конфигурации.
+
+    Эти файлы необязательны, поэтому ошибка в одном из них не останавливает запуск: она попадает в письмо как сбой
+    проверки, а документы и вторая проверка работают как обычно."""
     probes_path, logs_path = _monitor_paths(args)
-    monitors = []
-    try:
-        if probes_path.is_file():
+    monitors: list = []
+
+    def broken(name: str, error: ConfigError):
+        def check() -> MonitorResult:
+            raise error
+
+        return name, check
+
+    if probes_path.is_file():
+        try:
             probes = load_probes(probes_path)
             if probes.probes:
                 monitors.append(("Контрольные вызовы API", lambda: run_probes(probes, store)))
-        if logs_path.is_file():
+        except ConfigError as e:
+            monitors.append(broken("Контрольные вызовы API", e))
+    if logs_path.is_file():
+        try:
             logs = load_logwatch(logs_path)
             if logs:
                 monitors.append(("Журнал интеграции", lambda: run_logwatch(logs, store)))
-    except ConfigError as e:
-        return [], str(e)
-    return monitors, None
+        except ConfigError as e:
+            monitors.append(broken("Журнал интеграции", e))
+    return monitors
 
 
 def _monitor_command(args: argparse.Namespace, settings: Settings, kind: str) -> int:
@@ -369,11 +382,7 @@ def main(argv: list[str] | None = None) -> int:
         send_email(settings, subject, text, html_body)
 
     store = Store(settings.db_path)
-    monitors, monitor_error = ([], None) if args.no_monitors else _load_monitors(args, store)
-    if monitor_error:
-        store.close()
-        print(f"Ошибка конфигурации: {monitor_error}", file=sys.stderr)
-        return 2
+    monitors = [] if args.no_monitors else _load_monitors(args, store)
     try:
         report = run(
             sources,

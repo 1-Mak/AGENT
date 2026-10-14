@@ -292,9 +292,21 @@ def test_monitor_commands_explain_missing_and_broken_config(env, capsys, monkeyp
 
     write_config(env, probes="probes:\n  - {id: a}\n")
     assert cli_run(env, "probes", "--config", str(config)) == 2 and "id и url" in capsys.readouterr().out
-    monkeypatch.setattr(cli, "Fetcher", lambda *a, **k: FakeFetcher({}))
-    assert cli_run(env, "run", "--config", str(config), "--dry-run", "--no-llm") == 2
-    assert "id и url" in capsys.readouterr().err  # битый файл не молчит и не тянет за собой остальной запуск
+
+
+def test_broken_optional_file_is_a_warning_in_the_letter_and_does_not_stop_the_run(env, monkeypatch, capsys):
+    log_dir = env / "logs"
+    log_dir.mkdir()
+    (log_dir / "chz.log").write_text("начало\n", encoding="utf-8")
+    good_logs = f"logs:\n  - id: integration\n    paths: ['{log_dir.as_posix()}/*.log']\n    signatures: [{{id: dep, name: Устаревшее API, pattern: 'Устаревшее API'}}]\n"
+    config = write_config(env, probes="probes:\n  - {id: a}\n", logs=good_logs)  # probes.yaml битый, logwatch.yaml в порядке
+    monkeypatch.setattr(cli, "Fetcher", lambda *a, **k: FakeFetcher({INDEX_URL: index_html([20]), item_url(20): item_html(20)}))
+    monkeypatch.setattr(cli, "send_email", lambda *a, **k: None)
+    assert cli_run(env, "run", "--config", str(config), "--no-llm") == 0  # логи прочитаны как baseline, письмо о сбое проб не мешает
+    assert cli_run(env, "run", "--config", str(config), "--dry-run", "--no-llm") == 0
+    out = capsys.readouterr().out
+    assert "Контрольные вызовы API: проверка не удалась (ConfigError" in out and "id и url" in out
+    assert "Журнал интеграции: проверка не удалась" not in out  # вторая проверка работает
 
 
 def test_empty_probe_file_is_just_ignored_in_run(env, monkeypatch, capsys):

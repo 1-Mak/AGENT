@@ -143,7 +143,8 @@ def test_check_sources_page_and_sitemap_types(capsys):
 def test_check_sources_survives_garbage_sitemap(capsys):
     src = make_source(id="s", type="sitemap", url="https://x.ru/sitemap.xml")
     rc = check_sources([src], FakeFetcher({"https://x.ru/sitemap.xml": "<html>не xml"}))
-    assert rc == 1 and "ошибка разбора" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert rc == 1 and "sitemap не читается как XML" in out and "Traceback" not in out  # понятная причина вместо трассировки
 
 
 def test_check_sources_pdf_shows_extracted_text_and_clear_scan_error(capsys):
