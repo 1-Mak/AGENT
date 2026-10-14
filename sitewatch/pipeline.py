@@ -30,7 +30,7 @@ from .extract import (
 from .fetch import FetchError
 from .models import Change, DocRecord, Scope, Source
 from .notify import render, sort_key
-from .robots import GuardedFetcher, RobotsPolicy
+from .robots import GuardedFetcher, RobotsBlocked, RobotsPolicy
 from .signals import MonitorResult, Signal
 from .store import Store
 
@@ -177,13 +177,22 @@ def _check_page(
         return
     fresh = [u for u in links if u not in seen_pdfs]
     log.info("  PDF-ссылок на странице: %d", len(fresh))
+    blocked: list[str] = []
     for pdf_url in fresh[: source.max_pdf_links]:
         seen_pdfs.add(pdf_url)
         log.info("  PDF %s", pdf_url)
         try:
             _classify(res, store, fetch_record(source, pdf_url, fetcher, as_pdf=True), found_on=url, quiet=page_is_only_remembered)
+        except RobotsBlocked:
+            blocked.append(pdf_url)
         except (FetchError, SourceError) as e:  # один плохой файл не должен ронять проверку страницы
             log.warning("[%s] пропускаю PDF %s: %s", source.id, pdf_url, e)
+    if blocked:
+        # одной строкой на страницу: подробности про robots.txt уже есть в README, а семь одинаковых предупреждений тонут в журнале
+        log.warning(
+            "[%s] robots.txt сайта запрещает загрузку PDF (%d на странице %s), они пропущены. Если вы вправе их забирать: "
+            "robots: warn у этого источника в sources.yaml", source.id, len(blocked), url,
+        )
     if len(fresh) > source.max_pdf_links:
         log.warning(
             "[%s] на странице %d PDF-ссылок, обрабатываю первые %d (max_pdf_links)", source.id, len(fresh), source.max_pdf_links

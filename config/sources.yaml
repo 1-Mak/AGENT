@@ -125,39 +125,9 @@ sources:
     initial_notify: 0
     focus: "Порядок работы с икрой и морепродуктами в системе маркировки: коды, отчёты, документы, сроки."
 
-  # Раздел «Сообщество» на markirovka.ru: статьи самого Честного ЗНАКа по товарным группам (этапы, сроки, инструкции).
-  - id: markirovka-community-myaso
-    name: "markirovka.ru — статьи: мясная продукция, полуфабрикаты"
-    type: list
-    url: https://markirovka.ru/community/markirovka-myasnykh-izdeliy-polufabrikatov-i-zamorozhennoy-produktsii
-    link_pattern: '/community/markirovka-myasnykh-izdeliy-polufabrikatov-i-zamorozhennoy-produktsii/[^/?#]+/?$'
-    follow_pdf: true
-    max_pdf_links: 3
-    recheck_latest: 3
-    initial_notify: 0
-    focus: Этапы и сроки маркировки мяса, полуфабрикатов и замороженной продукции, инструкции для участников оборота.
-
-  - id: markirovka-community-konservy
-    name: "markirovka.ru — статьи: консервированная продукция"
-    type: list
-    url: https://markirovka.ru/community/markirovka-konservirovannykh-produktov
-    link_pattern: '/community/markirovka-konservirovannykh-produktov/[^/?#]+/?$'
-    follow_pdf: true
-    max_pdf_links: 3
-    recheck_latest: 3
-    initial_notify: 0
-    focus: Этапы и сроки маркировки мясных и рыбных консервов, инструкции; другие консервы не нужны.
-
-  - id: markirovka-community-ikra
-    name: "markirovka.ru — статьи: икра и морепродукты"
-    type: list
-    url: https://markirovka.ru/community/markirovka-ikry
-    link_pattern: '/community/markirovka-ikry/[^/?#]+/?$'
-    follow_pdf: true
-    max_pdf_links: 3
-    recheck_latest: 3
-    initial_notify: 0
-    focus: Этапы и сроки маркировки икры и морепродуктов, инструкции для участников оборота.
+  # Раздел «Сообщество» на markirovka.ru (статьи Честного ЗНАКа и партнёров по товарным группам) здесь не подключён:
+  # адреса разделов, найденные поиском, отвечают 404. Найти правильные: «run.bat discover https://markirovka.ru/community»
+  # покажет, какие группы ссылок есть на странице и какой link_pattern им подходит.
 
   # --- Примеры (раскомментируйте и подставьте свои адреса) ---
 

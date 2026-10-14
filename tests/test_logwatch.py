@@ -250,3 +250,8 @@ def test_log_that_did_not_exist_yet_is_not_marked_as_started(spec, tmp_path):
     assert first.signals == [] and any("первый запуск" in n for n in first.notes)  # история — не новость
     append(tmp_path, "chz.log", "Устаревшее API")
     assert len(day(spec, store).signals) == 1
+
+
+def test_missing_files_do_not_claim_that_a_position_was_remembered(spec, tmp_path):
+    result = day(spec, make_store())
+    assert not any("первый запуск" in n for n in result.notes) and any("не найдено" in n for n in result.notes)

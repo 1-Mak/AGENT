@@ -51,6 +51,14 @@ class RobotsPolicy:
             self._cache[base] = (parser, note)
         return self._cache[base]
 
+    def sitemaps(self, url: str) -> list[str]:
+        """Адреса sitemap, которые сайт сам указал в robots.txt (строки «Sitemap: ...»)."""
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https"):
+            return []
+        parser, _ = self._load(f"{parts.scheme}://{parts.netloc}")
+        return list(parser.site_maps() or []) if parser else []
+
     def check(self, url: str) -> Verdict:
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https"):

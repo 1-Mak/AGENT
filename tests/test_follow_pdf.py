@@ -228,3 +228,22 @@ def test_archive_pdfs_do_not_flood_the_letter_when_old_pages_are_rechecked_for_t
     fetcher.pages[ITEM_2] = article(PDF_B, PDF_MENU, title="Вторая")
     day3 = check_source(source, fetcher, store)
     assert {(c.record.url, c.kind) for c in day3.changes} == {(ITEM_2, "updated"), (PDF_MENU, "new")}
+
+
+def test_pdfs_closed_by_robots_txt_give_one_short_warning_per_page_and_warn_mode_loads_them(caplog):
+    from sitewatch.robots import GuardedFetcher, RobotsPolicy
+
+    robots = "User-agent: *\nDisallow: /upload/\n"
+    fetcher = site(**{ITEM_1: article(PDF_A, PDF_B), PDF_B: pdf_bytes("guide_v2"), "https://example.com/robots.txt": robots})
+
+    respect = GuardedFetcher(fetcher, RobotsPolicy(fetcher), "respect")
+    with caplog.at_level(logging.WARNING):
+        res = check_source(docs_source(), respect, make_store())
+    assert [c.record.url for c in res.changes] == [ITEM_1]  # сама страница открыта, файлы из /upload/ — нет
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "запрещает загрузку PDF (2 на странице" in warnings[0] and "robots: warn" in warnings[0]
+
+    caplog.clear()
+    permitted = GuardedFetcher(fetcher, RobotsPolicy(fetcher), "warn")  # решение пользователя: robots: warn
+    res = check_source(docs_source(), permitted, make_store())
+    assert [c.record.url for c in res.changes] == [ITEM_1, PDF_A, PDF_B]

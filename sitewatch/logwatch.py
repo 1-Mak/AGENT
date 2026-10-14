@@ -205,7 +205,8 @@ def scan_log(spec: LogSpec, store: Store) -> MonitorResult:
                 state[key] = previous[key]
 
     if not baselined:
-        result.notes.append(f"{spec.id}: первый запуск — запомнил позицию в {len(state)} файл(ах), историю не читаю")
+        if state:
+            result.notes.append(f"{spec.id}: первый запуск — запомнил позицию в {len(state)} файл(ах), историю не читаю")
     else:
         summary = ", ".join(f"{s.name}: {counts[s.id]}" for s in spec.signatures)
         result.notes.append(f"{spec.id}: прочитано {read_bytes // 1024} КБ в {len(files)} файл(ах); совпадения — {summary}")

@@ -25,6 +25,7 @@ EXTRA = [
     ("9", "Открыть .env для редактирования"),
     ("10", "Запустить тесты"),
     ("11", "Сбросить память: письма придут заново, как при первом запуске"),
+    ("14", "Разведка адреса: найти ссылки и link_pattern для нового источника"),
     ("0", "Выход"),
 ]
 EXIT_WORDS = {"0", "q", "quit", "exit", "в", "выход"}
@@ -126,6 +127,12 @@ def run_menu(
                 rc = 1
         elif choice == "8":
             rc = _schedule_menu(cli, base_args, input_fn)
+        elif choice == "14":
+            url = input_fn("Адрес страницы или раздела сайта: ").strip()
+            if not url:
+                continue
+            print(f"\n>>> sitewatch {' '.join(base_args + ['discover', url])}\n")
+            rc = cli(base_args + ["discover", url])
         elif choice == "9":
             _open_env(env_path)
             continue

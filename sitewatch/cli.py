@@ -14,6 +14,7 @@ from pathlib import Path
 from . import __version__, ui
 from .analyze import Analyzer, LLMError, NullAnalyzer, sample_change
 from .config import ConfigError, Settings, load_dotenv, load_scope, load_sources
+from .discover import discover_url
 from .doctor import check_sources, doctor
 from .fetch import Fetcher
 from .logwatch import load_logwatch, run_logwatch
@@ -113,6 +114,9 @@ def _parser() -> argparse.ArgumentParser:
     lw = sub.add_parser("logwatch", parents=[common], help="счётчики ошибок в журнале интеграции за время с прошлой проверки")
     _monitor_args(lw, logs=True)
     lw.add_argument("--save", action="store_true", help="запомнить позицию в журнале и счётчики (по умолчанию ничего не сохраняется)")
+
+    ds = sub.add_parser("discover", help="разведка адреса: группы ссылок, готовый link_pattern, PDF и sitemap (ничего не сохраняет)")
+    ds.add_argument("url", help="адрес страницы или раздела сайта")
 
     sub.add_parser("test-email", help="отправить тестовое письмо, чтобы проверить настройки SMTP")
     sub.add_parser("test-llm", help="проверить ключ и модель DeepSeek на примере и показать расход токенов")
@@ -328,6 +332,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "doctor":
         return doctor(settings, args.config, args.env, online=not args.offline, monitor_paths=_monitor_paths(args))
+
+    if args.command == "discover":
+        fetcher = Fetcher(settings.user_agent, settings.request_timeout, settings.request_delay, max_bytes=int(settings.max_pdf_mb * 1024 * 1024))
+        return discover_url(args.url, fetcher)
 
     if args.command in ("probes", "logwatch"):
         return _monitor_command(args, settings, args.command)
