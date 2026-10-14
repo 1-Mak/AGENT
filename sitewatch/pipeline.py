@@ -14,10 +14,22 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from .config import Settings
-from .extract import ExtractError, extract_document, extract_links, extract_pdf, is_pdf_url, parse_sitemap
+from .extract import (
+    ExtractError,
+    extract_document,
+    extract_links,
+    extract_pdf,
+    extract_text_file,
+    is_file_url,
+    is_pdf_url,
+    local_path,
+    parse_sitemap,
+    parse_telegram,
+)
 from .fetch import FetchError
-from .models import Change, DocRecord, Source
+from .models import Change, DocRecord, Scope, Source
 from .notify import importance_rank, render
+from .robots import GuardedFetcher, RobotsPolicy
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -54,6 +66,7 @@ class RunReport:
     failed_sources: int
     total_sources: int
     sent: bool
+    filtered: list[Change] = field(default_factory=list)  # не относятся к теме читателя, в письмо не вошли
 
 
 # --- обнаружение документов ---
@@ -79,13 +92,28 @@ def discover(source: Source, fetcher: PageFetcher) -> list[str]:
     return list(dict.fromkeys(loc for loc, _ in entries))
 
 
+def _read_bytes(fetcher: PageFetcher, url: str) -> bytes:
+    return local_path(url).read_bytes() if is_file_url(url) else fetcher.get_bytes(url)
+
+
+def _read_text(fetcher: PageFetcher, url: str) -> str:
+    if is_file_url(url):
+        return local_path(url).read_bytes().decode("utf-8", errors="replace")
+    return fetcher.get(url)
+
+
 def fetch_record(source: Source, url: str, fetcher: PageFetcher) -> DocRecord:
-    """Скачивает документ и приводит его к тексту: PDF — через разбор файла, остальное — как HTML."""
+    """Скачивает документ и приводит его к тексту: PDF — через разбор файла, text — как есть, остальное — как HTML.
+    Адреса file:// читаются с диска (удобно для собственной копии спецификации)."""
     try:
         if source.type == "pdf" or is_pdf_url(url):
-            title, text = extract_pdf(fetcher.get_bytes(url), url, source.ignore_regex)
+            title, text = extract_pdf(_read_bytes(fetcher, url), url, source.ignore_regex)
+        elif source.type == "text":
+            title, text = extract_text_file(_read_text(fetcher, url), url)
         else:
-            title, text = extract_document(fetcher.get(url), url, source.content_selector, source.ignore_regex)
+            title, text = extract_document(_read_text(fetcher, url), url, source.content_selector, source.ignore_regex)
+    except OSError as e:  # нет файла, нет прав
+        raise SourceError(f"{url}: не удалось прочитать файл ({e})") from e
     except ExtractError as e:
         raise SourceError(f"{url}: {e}") from e
     if not text.strip():
@@ -119,14 +147,48 @@ def _classify(res: SourceResult, store: Store, record: DocRecord) -> None:
         log.info("  без изменений")
 
 
+def _check_telegram(source: Source, fetcher: PageFetcher, store: Store, res: SourceResult) -> SourceResult:
+    """Канал целиком читается с одной страницы t.me/s/<канал>: каждое сообщение — отдельный документ."""
+    messages = parse_telegram(_read_text(fetcher, source.url))
+    if not messages:
+        raise SourceError(
+            f"{source.url}: не найдено ни одного сообщения с текстом — канал закрыт, адрес без /s/ "
+            "(нужен вид https://t.me/s/имя_канала) или Telegram отдал заглушку"
+        )
+    records = [DocRecord(url, source.id, title, hashlib.sha256(text.encode("utf-8")).hexdigest(), text) for url, title, text in messages]
+    known = store.known_urls(source.id)
+    log.info("[%s] сообщений на странице: %d, из них новых: %d", source.id, len(records), sum(r.url not in known for r in records))
+
+    if res.baseline:
+        log.info("[%s] первый запуск: в письмо возьму самых свежих: %d, остальные запомню молча", source.id, source.initial_notify)
+        for index, record in enumerate(records):
+            if index < source.initial_notify:
+                res.changes.append(Change(source, record, "new"))
+            else:
+                res.silent.append(record)
+        return res
+
+    fresh = [r for r in records if r.url not in known][: source.max_new_per_run]
+    for record in fresh:
+        log.info("[%s] %s: НОВОЕ сообщение -> войдёт в письмо", source.id, record.title)
+        res.changes.append(Change(source, record, "new"))
+    for record in records[: source.recheck_latest]:
+        if record.url in known:
+            _classify(res, store, record)  # правки уже опубликованных сообщений
+    return res
+
+
 def check_source(source: Source, fetcher: PageFetcher, store: Store) -> SourceResult:
     baseline = not store.source_state(source.id).baselined
     res = SourceResult(source, baseline=baseline)
     log.info("[%s] проверяю %s (тип: %s)", source.id, source.url, source.type)
 
-    if source.type in ("page", "pdf"):
+    if source.type in ("page", "pdf", "text"):
         _classify(res, store, fetch_record(source, source.url, fetcher))
         return res
+
+    if source.type == "telegram":
+        return _check_telegram(source, fetcher, store, res)
 
     urls = discover(source, fetcher)
     if not urls:
@@ -183,6 +245,7 @@ def run(
     analyzer: ChangeAnalyzer,
     mailer: Callable[[str, str, str], None],
     settings: Settings,
+    scope: Scope | None = None,
     dry_run: bool = False,
     out: Callable[[str], None] = print,
 ) -> RunReport:
@@ -195,9 +258,12 @@ def run(
     alerted_ids: list[str] = []
     failed = 0
 
+    robots = RobotsPolicy(fetcher)
     for source in sources:
+        mode = source.robots or settings.robots_mode
+        source_fetcher = GuardedFetcher(fetcher, robots, mode) if mode in ("respect", "warn") else fetcher
         try:
-            results.append(check_source(source, fetcher, store))
+            results.append(check_source(source, source_fetcher, store))
         except (SourceError, FetchError) as e:
             failed += 1
             log.error("[%s] сбой проверки: %s", source.id, e)
@@ -217,6 +283,21 @@ def run(
             log.info("  разбор готов, важность: %s", change.analysis.importance)
         else:
             log.info("  разбора нет — в письме будет фрагмент текста")
+
+    scope = scope or Scope()
+    filtered: list[Change] = []
+    if scope.interests:
+        kept = []
+        for change in changes:
+            a = change.analysis
+            irrelevant = a is not None and (a.relevance == "не относится" or (a.relevance == "общее" and not scope.include_general))
+            if irrelevant:
+                log.info("«%s»: не относится к теме — в письмо не включаю (%s)", change.record.title, a.relevance_note or "без пояснения")
+                filtered.append(change)
+            else:
+                kept.append(change)
+        changes = kept
+
     changes.sort(key=importance_rank)
     reason = getattr(analyzer, "disabled_reason", None)
     if changes and reason:
@@ -225,7 +306,7 @@ def run(
 
     sent = False
     if changes or alerts:
-        subject, text, html_body = render(changes, alerts)
+        subject, text, html_body = render(changes, alerts, scope=scope, filtered=filtered)
         if dry_run:
             log.info("Пробный режим: письмо «%s» не отправляется, вот его текст:", subject)
             out(f"Тема: {subject}\n\n{text}")
@@ -248,5 +329,8 @@ def run(
             store.mark_alerted(sid)
         log.info("Состояние сохранено (записей: %d)", saved)
 
-    log.info("Готово: источников %d (сбоев %d), обновлений %d", len(sources), failed, len(changes))
-    return RunReport(changes, alerts, failed, len(sources), sent)
+    log.info(
+        "Готово: источников %d (сбоев %d), обновлений в письме %d, отфильтровано по теме %d",
+        len(sources), failed, len(changes), len(filtered),
+    )
+    return RunReport(changes, alerts, failed, len(sources), sent, filtered)

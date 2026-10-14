@@ -32,8 +32,33 @@ class Analysis(BaseModel):
     )
     importance: Literal["высокая", "средняя", "низкая"] = Field(description="Важность изменения для читателя.")
     importance_reason: str = Field(default="", description="Одно предложение: почему выбрана такая важность.")
+    relevance: Literal["прямо", "общее", "не относится"] = Field(
+        default="общее",
+        description="«прямо» — есть изменения по теме читателя; «общее» — касается всех товарных групп или системы "
+        "в целом; «не относится» — только про другие товарные группы.",
+    )
+    relevance_note: str = Field(default="", description="Одна фраза: что отобрано из документа или почему он не относится к теме.")
+    nearest_deadline: str = Field(default="", description="Ближайший срок, который нужно учесть, как ДД.ММ.ГГГГ. Пусто, если сроков нет.")
+    affected_components: list[str] = Field(
+        default_factory=list, description="Названия записей из таблицы соответствий, которых касается изменение."
+    )
 
-    @field_validator("key_changes", "deadlines", "required_actions", mode="before")
+    @field_validator("relevance", mode="before")
+    @classmethod
+    def _relevance_norm(cls, value):
+        if not isinstance(value, str):
+            return value
+        v = value.strip().lower()
+        if v.startswith("не относ"):
+            return "не относится"
+        return "прямо" if v.startswith("прям") else v
+
+    @field_validator("nearest_deadline", mode="before")
+    @classmethod
+    def _deadline_text(cls, value):
+        return "" if value is None else str(value).strip()
+
+    @field_validator("key_changes", "deadlines", "required_actions", "affected_components", mode="before")
     @classmethod
     def _as_list(cls, value):
         if value is None:
@@ -57,7 +82,7 @@ class Analysis(BaseModel):
 class Source:
     id: str
     name: str
-    type: str  # page | list | sitemap
+    type: str  # page | list | sitemap | pdf | text | telegram
     url: str
     focus: str = ""
     link_pattern: str | None = None
@@ -66,6 +91,26 @@ class Source:
     recheck_latest: int = 0
     initial_notify: int = 0
     max_new_per_run: int = 10
+    enabled: bool = True  # выключенный источник не участвует в run, но его можно проверить через check-sources
+    robots: str = ""  # respect | warn | off; пусто — как в настройках (SITEWATCH_ROBOTS)
+
+
+@dataclass(frozen=True)
+class GlossaryEntry:
+    """Строка таблицы «метод API или термин -> где менять в вашей системе»."""
+
+    name: str
+    terms: tuple[str, ...] = ()
+    where: str = ""
+
+
+@dataclass(frozen=True)
+class Scope:
+    """Что нужно читателю. Пустые interests — фильтра нет, присылается всё найденное."""
+
+    interests: str = ""
+    include_general: bool = True  # общие изменения (API, авторизация, форматы) касаются и вашей темы
+    glossary: tuple[GlossaryEntry, ...] = ()
 
 
 @dataclass

@@ -11,11 +11,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import __version__, ui
-from .config import ConfigError, Settings, load_sources
-from .extract import extract_document, extract_links
+from .config import ConfigError, Settings, load_scope, load_sources
+from .extract import extract_document, extract_links, parse_telegram
 from .fetch import FetchError
 from .models import Source
 from .pipeline import PageFetcher, SourceError, discover, fetch_record
+from .robots import GuardedFetcher, RobotsPolicy
 from .store import Store
 
 PREVIEW_LINES = 15
@@ -71,15 +72,38 @@ def doctor(settings: Settings, config_path: str, env_path: str, online: bool = T
         ui.warn("DEEPSEEK_API_KEY не задан — письма будут без разбора, только фрагменты текста")
     ui.ok(f"модель: {settings.llm_model}; размышления: {'вкл' if settings.llm_thinking else 'выкл'}; {settings.llm_base_url}")
 
+    ui.title("Тема писем (фильтр)")
+    try:
+        scope = load_scope(config_path)
+        if scope.interests:
+            ui.ok(f"в письма попадает только: {scope.interests}")
+            ui.info("общие изменения (API, авторизация, форматы): " + ("берём" if scope.include_general else "не берём"))
+        else:
+            ui.warn("фильтра по теме нет (блок scope.interests в конфиге пуст) — присылается всё найденное")
+        if scope.glossary:
+            filled = sum(1 for e in scope.glossary if e.where)
+            ui.ok(f"таблица «что менять»: записей {len(scope.glossary)}, с указанием места правки {filled}")
+            if filled < len(scope.glossary):
+                ui.warn("у части записей не заполнено where: в письме будет только название, без места правки")
+        else:
+            ui.info("таблицы «что менять» нет (scope.glossary) — письмо ответит на «что изменилось», но не на «где править»")
+    except ConfigError as e:
+        fails += 1
+        ui.fail(str(e))
+
     ui.title("Источники")
     sources: list[Source] = []
     try:
         sources = load_sources(config_path)
-        ui.ok(f"{config_path}: источников {len(sources)}")
+        enabled = [s for s in sources if s.enabled]
+        ui.ok(f"{config_path}: источников {len(sources)}, включено {len(enabled)}")
         for s in sources:
-            ui.info(f"- {s.id} [{s.type}] {s.url}")
+            mark = "" if s.enabled else "  [ВЫКЛЮЧЕН: enabled: false]"
+            ui.info(f"- {s.id} [{s.type}] {s.url}{mark}")
             if s.link_pattern:
                 ui.info(f"    шаблон ссылок: {s.link_pattern}")
+        if len(enabled) < len(sources):
+            ui.info("Выключенные источники проверяются пунктом «Проверка источников»; включить — убрать enabled: false.")
     except ConfigError as e:
         fails += 1
         ui.fail(str(e))
@@ -105,10 +129,12 @@ def doctor(settings: Settings, config_path: str, env_path: str, online: bool = T
         ui.title("Сеть (проверка соединения)")
         if any(os.environ.get(k) for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")):
             ui.warn("задан прокси в переменных окружения: проверка ниже идёт напрямую и может не совпадать с реальной работой")
+        ui.info(f"robots.txt: режим {settings.robots_mode} (respect — не ходить туда, где запрещено; warn — только предупреждать; off)")
         targets: dict[str, tuple[str, int]] = {}
         for s in sources:
             host, port = _host_port(s.url)
-            targets[f"источник {s.id}"] = (host, port)
+            if s.enabled and host:  # file:// и выключенные источники по сети не проверяем
+                targets[f"источник {s.id}"] = (host, port)
         if settings.llm_api_key:
             targets["DeepSeek API"] = _host_port(settings.llm_base_url)
         if settings.smtp_host:
@@ -158,24 +184,60 @@ def _show_links(links: list[str]) -> None:
         ui.info(f"  ... и ещё {len(links) - SAMPLE_LINKS}")
 
 
-def check_sources(sources: list[Source], fetcher: PageFetcher) -> int:
+def _report_robots(policy: RobotsPolicy, source: Source, mode: str) -> bool:
+    """Печатает вердикт robots.txt. True — в режиме respect загрузка запрещена и источник проверять нельзя."""
+    verdict = policy.check(source.url)
+    if verdict.allowed:
+        ui.ok(f"robots.txt: загрузка разрешена. {verdict.note}".strip())
+    elif mode == "respect":
+        ui.fail("robots.txt сайта ЗАПРЕЩАЕТ автоматическую загрузку этого адреса; в режиме respect источник не будет работать")
+        ui.info("Если вы вправе забирать эту страницу, разрешите явно: robots: warn (или off) у источника в sources.yaml.")
+    else:
+        ui.warn(f"robots.txt сайта запрещает загрузку этого адреса; режим {mode}: загружаю всё равно, решение за вами")
+    if verdict.crawl_delay:
+        ui.info(f"сайт просит паузу между запросами: {verdict.crawl_delay} с (в настройках SITEWATCH_REQUEST_DELAY)")
+    return not verdict.allowed and mode == "respect"
+
+
+def check_sources(sources: list[Source], fetcher: PageFetcher, robots_mode: str = "off") -> int:
     """Показывает, что видит парсер на каждом сайте. Базу не трогает, писем не шлёт."""
     fails = 0
+    policy = RobotsPolicy(fetcher)
     for source in sources:
-        ui.title(f"{source.name}  [{source.id}]")
+        ui.title(f"{source.name}  [{source.id}]" + ("" if source.enabled else "  (ВЫКЛЮЧЕН)"))
         ui.info(f"тип: {source.type}; адрес: {source.url}")
+        mode = source.robots or robots_mode
+        if mode in ("respect", "warn"):
+            if _report_robots(policy, source, mode):
+                fails += 1
+                continue  # запрещено — страницу не запрашиваем, причина уже показана
+            fetcher_for_source: PageFetcher = GuardedFetcher(fetcher, policy, mode)
+        else:
+            fetcher_for_source = fetcher
+        fetcher_ = fetcher_for_source
         try:
-            if source.type in ("page", "pdf"):
-                _preview(source, source.url, fetcher)
+            if source.type in ("page", "pdf", "text"):
+                _preview(source, source.url, fetcher_)
+            elif source.type == "telegram":
+                messages = parse_telegram(fetcher_.get(source.url))
+                if messages:
+                    ui.ok(f"сообщений с текстом на странице: {len(messages)} (первое — самое свежее)")
+                    for _, title, _ in messages[:3]:
+                        ui.info(f"  {title}")
+                    for line in messages[0][2].splitlines()[:PREVIEW_LINES]:
+                        ui.info("  | " + (line if len(line) <= 110 else line[:107] + "..."))
+                else:
+                    fails += 1
+                    ui.fail("сообщений не найдено: канал закрыт, адрес без /s/ (нужен https://t.me/s/имя_канала) или пришла заглушка")
             elif source.type == "list":
-                page = fetcher.get(source.url)
+                page = fetcher_.get(source.url)
                 page_title, _ = extract_document(page, source.url)
                 ui.ok(f"страница списка загружена: «{page_title}», {len(page)} символов HTML")
                 matches = extract_links(page, source.url, source.link_pattern)
                 if matches:
                     ui.ok(f"ссылок по шаблону {source.link_pattern!r}: {len(matches)} (первая — самая свежая)")
                     _show_links(matches)
-                    _preview(source, matches[0], fetcher)
+                    _preview(source, matches[0], fetcher_)
                 else:
                     fails += 1
                     ui.fail(f"по шаблону {source.link_pattern!r} ничего не найдено")
@@ -185,11 +247,11 @@ def check_sources(sources: list[Source], fetcher: PageFetcher) -> int:
                     ui.info("Что проверить: 1) не заглушка ли это (заголовок страницы выше); 2) подходит ли шаблон")
                     ui.info("к этим адресам; 3) если ссылок почти нет — список грузится скриптом, используйте type: sitemap.")
             else:  # sitemap
-                urls = discover(source, fetcher)
+                urls = discover(source, fetcher_)
                 if urls:
                     ui.ok(f"адресов в sitemap по шаблону {source.link_pattern!r}: {len(urls)}")
                     _show_links(urls)
-                    _preview(source, urls[0], fetcher)
+                    _preview(source, urls[0], fetcher_)
                 else:
                     fails += 1
                     ui.fail(f"в sitemap нет адресов по шаблону {source.link_pattern!r}")

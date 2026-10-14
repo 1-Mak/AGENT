@@ -14,7 +14,9 @@ CHUNK = 64 * 1024
 
 
 class FetchError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status  # HTTP-код, если ошибка пришла от сервера
 
 
 class Fetcher:
@@ -63,7 +65,7 @@ class Fetcher:
         resp._content_consumed = True
 
     def _request(self, url: str) -> requests.Response:
-        last_error = "неизвестная ошибка"
+        last_error, last_status = "неизвестная ошибка", None
         for attempt in range(self.retries + 1):
             self._throttle()
             started = time.monotonic()
@@ -71,7 +73,7 @@ class Fetcher:
                 resp = self.session.get(url, timeout=self.timeout, stream=True)
                 self._load_body(resp, url)
             except requests.RequestException as e:
-                last_error = f"{type(e).__name__}: {e}"
+                last_error, last_status = f"{type(e).__name__}: {e}", None
                 log.warning("GET %s -> ошибка: %s", url, last_error)
             else:
                 log.info(
@@ -79,14 +81,14 @@ class Fetcher:
                 )
                 if resp.status_code < 400:
                     return resp
-                last_error = f"HTTP {resp.status_code}"
+                last_error, last_status = f"HTTP {resp.status_code}", resp.status_code
                 if resp.status_code < 500 and resp.status_code != 429:
                     break  # 4xx (кроме 429) повторять бессмысленно
             if attempt < self.retries:
                 pause = 2 ** (attempt + 1)
                 log.info("Повтор через %s с: %s (%s)", pause, url, last_error)
                 time.sleep(pause)
-        raise FetchError(f"{url}: {last_error}")
+        raise FetchError(f"{url}: {last_error}", last_status)
 
     def get(self, url: str) -> str:
         """Страница как текст (HTML, XML)."""

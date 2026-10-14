@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from sitewatch.config import Settings
+from sitewatch.fetch import FetchError
 from sitewatch.models import Analysis, Change, DocRecord, Source
 from sitewatch.store import Store
 
@@ -54,18 +55,20 @@ class FakeFetcher:
         self.pages = pages
         self.calls: list[str] = []
 
-    def get(self, url: str) -> str:
+    def _page(self, url: str):
         self.calls.append(url)
+        if url not in self.pages:
+            raise FetchError(f"{url}: HTTP 404", 404)  # как у настоящего сайта: страницы, которой нет в макете, нет и на сайте
         value = self.pages[url]
         if isinstance(value, Exception):
             raise value
-        return value  # type: ignore[return-value]
+        return value
+
+    def get(self, url: str) -> str:
+        return self._page(url)  # type: ignore[return-value]
 
     def get_bytes(self, url: str) -> bytes:
-        self.calls.append(url)
-        value = self.pages[url]
-        if isinstance(value, Exception):
-            raise value
+        value = self._page(url)
         assert isinstance(value, bytes), f"для {url} в макете ожидались байты (PDF)"
         return value
 
@@ -88,13 +91,19 @@ def make_change(text="Текст документа", kind="new", diff="", title
 
 
 class FakeAnalyzer:
-    def __init__(self, importance: str = "средняя", disabled_reason: str | None = None):
+    def __init__(self, importance: str = "средняя", disabled_reason: str | None = None, relevance: str = "прямо",
+                 relevance_by_title: dict[str, str] | None = None, components: tuple[str, ...] = (), deadline: str = ""):
         self.importance = importance
         self.disabled_reason = disabled_reason
+        self.relevance = relevance
+        self.relevance_by_title = relevance_by_title or {}
+        self.components = components
+        self.deadline = deadline
         self.seen: list[str] = []
 
     def analyze(self, change):
         self.seen.append(change.record.url)
+        relevance = self.relevance_by_title.get(change.record.title, self.relevance)
         return Analysis(
             summary=f"Разбор: {change.record.title}",
             key_changes=["изменение 1"],
@@ -103,6 +112,10 @@ class FakeAnalyzer:
             required_actions=[],
             importance=self.importance,
             importance_reason="тест",
+            relevance=relevance,
+            relevance_note=f"отбор: {relevance}",
+            nearest_deadline=self.deadline,
+            affected_components=list(self.components),
         )
 
 
@@ -133,7 +146,7 @@ def make_source(**overrides) -> Source:
 
 
 def make_settings(**overrides) -> Settings:
-    params = dict(mail_from="bot@example.com", mail_to=("me@example.com",), smtp_host="smtp.example.com")
+    params = dict(mail_from="bot@example.com", mail_to=("me@example.com",), smtp_host="smtp.example.com", robots_mode="off")
     params.update(overrides)
     return Settings(**params)
 

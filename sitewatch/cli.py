@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import __version__, ui
 from .analyze import Analyzer, LLMError, NullAnalyzer, sample_change
-from .config import ConfigError, Settings, load_dotenv, load_sources
+from .config import ConfigError, Settings, load_dotenv, load_scope, load_sources
 from .doctor import check_sources, doctor
 from .fetch import Fetcher
 from .menu import run_menu
@@ -182,7 +182,8 @@ def _reset(settings: Settings, source_ids: list[str] | None, assume_yes: bool) -
     return 0
 
 
-def _select_sources(config: str, wanted: list[str] | None) -> list[Source] | None:
+def _select_sources(config: str, wanted: list[str] | None, *, include_disabled: bool = False) -> list[Source] | None:
+    """Источники для команды. Явно названные через --source берутся даже выключенные (чтобы проверить до включения)."""
     try:
         sources = load_sources(config)
     except ConfigError as e:
@@ -193,8 +194,14 @@ def _select_sources(config: str, wanted: list[str] | None) -> list[Source] | Non
         if unknown:
             print(f"Нет таких источников в конфиге: {', '.join(sorted(unknown))}", file=sys.stderr)
             return None
-        sources = [s for s in sources if s.id in wanted]
-    return sources
+        return [s for s in sources if s.id in wanted]
+    if include_disabled:
+        return sources
+    enabled = [s for s in sources if s.enabled]
+    if not enabled:
+        print("Все источники выключены (enabled: false). Включите нужные в config/sources.yaml.", file=sys.stderr)
+        return None
+    return enabled
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -233,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Отправлено на: {', '.join(settings.mail_to)}")
         return 0
 
-    sources = _select_sources(args.config, args.source)
+    sources = _select_sources(args.config, args.source, include_disabled=args.command == "check-sources")
     if sources is None:
         return 2
     fetcher = Fetcher(
@@ -241,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.command == "check-sources":
-        return check_sources(sources, fetcher)
+        return check_sources(sources, fetcher, settings.robots_mode)
 
     # run
     if not args.dry_run and settings.missing_mail_settings():
@@ -254,7 +261,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.no_llm and not settings.llm_api_key:
         log.warning("DEEPSEEK_API_KEY не задан — письма будут без разбора агентом")
-    analyzer = NullAnalyzer() if args.no_llm else Analyzer.from_settings(settings)
+    try:
+        scope = load_scope(args.config)
+    except ConfigError as e:
+        print(f"Ошибка конфигурации: {e}", file=sys.stderr)
+        return 2
+    if scope.interests:
+        log.info("Тема писем: %s (общие изменения: %s)", scope.interests, "берём" if scope.include_general else "не берём")
+    analyzer = NullAnalyzer() if args.no_llm else Analyzer.from_settings(settings, scope)
 
     def mailer(subject: str, text: str, html_body: str) -> None:
         log.info("Отправляю на %s через %s:%s", ", ".join(settings.mail_to), settings.smtp_host, settings.smtp_port)
@@ -269,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
             analyzer=analyzer,
             mailer=mailer,
             settings=settings,
+            scope=scope,
             dry_run=args.dry_run,
         )
     except MailError as e:

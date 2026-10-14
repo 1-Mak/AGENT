@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter
-from pathlib import PurePosixPath
+from datetime import date
+from pathlib import Path, PurePosixPath
+from urllib.request import url2pathname
 from urllib.parse import quote, unquote, urldefrag, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
@@ -218,3 +221,73 @@ def extract_pdf(data: bytes, url: str, ignore_regex: tuple[str, ...] = ()) -> tu
         lines.append("[Колонтитулы: " + " | ".join(kept_repeated) + "]")
     log.info("  PDF: страниц %d, строк %d, разбор занял %.1f с", len(reader.pages), len(lines), time.monotonic() - started)
     return title, "\n".join(lines)
+
+
+# --- локальные файлы (file://) ---
+
+
+def is_file_url(url: str) -> bool:
+    return url.lower().startswith("file://")
+
+
+def local_path(url: str) -> Path:
+    """file:///C:/specs/api.json -> C:\\specs\\api.json (на Windows), /tmp/api.json (на Linux)."""
+    return Path(url2pathname(urlsplit(url).path))
+
+
+# --- текстовые файлы (JSON/OpenAPI, YAML, обычный текст) ---
+
+
+def extract_text_file(text: str, url: str) -> tuple[str, str]:
+    """Файл как текст. JSON приводится к каноническому виду (отступы, порядок ключей), чтобы в сравнении
+    были только смысловые правки, а не перестановки. У OpenAPI заголовком становится info.title + info.version."""
+    text = text.lstrip("\ufeff")
+    name = PurePosixPath(unquote(urlsplit(url).path)).name or url
+    try:
+        data = json.loads(text)
+    except ValueError:
+        body = "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip("\n")
+        title = name
+    else:
+        body = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+        info = data.get("info") if isinstance(data, dict) else None
+        title = name
+        if isinstance(info, dict) and info.get("title"):
+            title = f"{info['title']} {info.get('version', '')}".strip()
+    if not body.strip():
+        raise ExtractError("файл пустой")
+    return title, body
+
+
+# --- Telegram-канал (публичная веб-версия t.me/s/<канал>) ---
+
+
+def parse_telegram(html: str) -> list[tuple[str, str, str]]:
+    """Сообщения канала, от новых к старым: [(адрес сообщения, заголовок, текст)]. Сообщения без текста пропускаются."""
+    soup = BeautifulSoup(html, "lxml")
+    found: list[tuple[int, str, str, str]] = []
+    for node in soup.select("div.tgme_widget_message[data-post]"):
+        post = node.get("data-post", "")
+        tail = post.rsplit("/", 1)[-1]
+        text_node = node.select_one(".js-message_text") or node.select_one(".tgme_widget_message_text")
+        if "/" not in post or not tail.isdigit() or text_node is None:
+            continue
+        for br in text_node.find_all("br"):
+            br.replace_with("\n")
+        for a in text_node.find_all("a", href=True):
+            href = a["href"].strip()
+            if href.startswith("http") and href.rstrip("/") != a.get_text(strip=True).rstrip("/"):
+                a.append(f" [{href}]")
+        lines = _clean_lines(text_node.get_text())
+        if not lines:
+            continue
+        when = node.select_one("time[datetime]")
+        day = ""
+        if when:
+            try:
+                day = date.fromisoformat(when["datetime"][:10]).strftime("%d.%m.%Y") + ": "
+            except ValueError:
+                pass
+        found.append((int(tail), f"https://t.me/{post}", day + lines[0][:100], "\n".join(lines)))
+    found.sort(key=lambda m: m[0], reverse=True)
+    return [(url, title, text) for _, url, title, text in found]

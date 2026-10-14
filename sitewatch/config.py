@@ -10,9 +10,10 @@ from pathlib import Path
 import yaml
 
 from .extract import normalize_url
-from .models import Source
+from .models import GlossaryEntry, Scope, Source
 
-VALID_TYPES = {"page", "list", "sitemap", "pdf"}
+VALID_TYPES = {"page", "list", "sitemap", "pdf", "text", "telegram"}
+VALID_ROBOTS = {"", "respect", "warn", "off"}
 
 
 class ConfigError(Exception):
@@ -56,6 +57,7 @@ class Settings:
     llm_thinking: bool = False  # режим размышлений: для пересказа не нужен, а токены платные
     max_doc_chars: int = 120_000
     max_pdf_mb: float = 50.0  # файлы больше этого размера не скачиваются
+    robots_mode: str = "respect"  # respect — не ходить туда, где запрещает robots.txt; warn — только предупреждать; off
     failure_alert_threshold: int = 3
     smtp_host: str = ""
     smtp_port: int = 465
@@ -74,6 +76,7 @@ class Settings:
             user_agent=env.get("SITEWATCH_USER_AGENT", cls.user_agent),
             request_delay=float(env.get("SITEWATCH_REQUEST_DELAY", cls.request_delay)),
             max_pdf_mb=float(env.get("SITEWATCH_MAX_PDF_MB", cls.max_pdf_mb)),
+            robots_mode=env.get("SITEWATCH_ROBOTS", cls.robots_mode).strip().lower() or cls.robots_mode,
             llm_api_key=env.get("DEEPSEEK_API_KEY") or env.get("LLM_API_KEY", ""),
             llm_base_url=env.get("LLM_BASE_URL", cls.llm_base_url).rstrip("/"),
             llm_model=env.get("LLM_MODEL", cls.llm_model),
@@ -141,6 +144,10 @@ def load_sources(path: str | Path) -> list[Source]:
                 except re.error as e:
                     raise ConfigError(f"{where}: некорректное регулярное выражение {rx!r}: {e}") from e
 
+        robots = str(raw.get("robots") or "").lower()
+        if robots not in VALID_ROBOTS:
+            raise ConfigError(f"{where}: robots должен быть respect, warn или off (получено: {robots!r})")
+
         sources.append(
             Source(
                 id=sid,
@@ -152,8 +159,58 @@ def load_sources(path: str | Path) -> list[Source]:
                 content_selector=raw.get("content_selector"),
                 ignore_regex=ignore,
                 recheck_latest=int(raw.get("recheck_latest", 0)),
-                initial_notify=int(raw.get("initial_notify", 1 if stype in ("list", "sitemap") else 0)),
+                initial_notify=int(raw.get("initial_notify", 1 if stype in ("list", "sitemap", "telegram") else 0)),
                 max_new_per_run=int(raw.get("max_new_per_run", 10)),
+                enabled=bool(raw.get("enabled", True)),
+                robots=robots,
             )
         )
     return sources
+
+
+def _read_yaml(path: Path, what: str) -> dict:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as e:
+        raise ConfigError(f"{what}: не удалось прочитать {path}: {e}") from e
+    if not isinstance(data, dict):
+        raise ConfigError(f"{what}: {path} должен содержать словарь")
+    return data
+
+
+def load_glossary(path: Path) -> tuple[GlossaryEntry, ...]:
+    entries = []
+    for i, raw in enumerate(_read_yaml(path, "глоссарий").get("entries") or [], 1):
+        if not isinstance(raw, dict) or not raw.get("name"):
+            raise ConfigError(f"глоссарий {path}: запись №{i} без поля name")
+        entries.append(
+            GlossaryEntry(
+                name=str(raw["name"]).strip(),
+                terms=tuple(str(t).strip() for t in (raw.get("terms") or []) if str(t).strip()),
+                where=" ".join(str(raw.get("where") or "").split()),
+            )
+        )
+    return tuple(entries)
+
+
+def load_scope(path: str | Path) -> Scope:
+    """Блок scope из файла источников: тема, которая нужна читателю, и таблица «что где менять»."""
+    p = Path(path)
+    block = _read_yaml(p, "конфигурация").get("scope") or {}
+    if not isinstance(block, dict):
+        raise ConfigError(f"{p}: scope должен быть словарём")
+    glossary: tuple[GlossaryEntry, ...] = ()
+    if block.get("glossary"):
+        gpath = Path(str(block["glossary"]))
+        if not gpath.is_absolute():
+            # сначала рядом с файлом источников, потом от рабочей папки (так пишут и «glossary.yaml», и «config/glossary.yaml»)
+            candidates = [p.parent / gpath, Path.cwd() / gpath]
+            gpath = next((c for c in candidates if c.is_file()), candidates[0])
+        if not gpath.is_file():
+            raise ConfigError(f"scope.glossary: файл не найден: {block['glossary']}")
+        glossary = load_glossary(gpath)
+    return Scope(
+        interests=" ".join(str(block.get("interests") or "").split()),
+        include_general=bool(block.get("include_general", True)),
+        glossary=glossary,
+    )

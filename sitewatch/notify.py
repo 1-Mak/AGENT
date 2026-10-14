@@ -10,7 +10,7 @@ from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 
 from .config import Settings
-from .models import Change
+from .models import Change, Scope
 
 KIND_LABEL = {"new": "новая страница", "updated": "страница обновлена"}
 IMPORTANCE_ORDER = {"высокая": 0, "средняя": 1, "низкая": 2}
@@ -35,20 +35,38 @@ def _fallback_excerpt(change: Change) -> str:
 
 
 def _subject(changes: list[Change], alerts: list[str]) -> str:
+    if not changes:
+        return "[Мониторинг] Сбой: источник недоступен"
+    top = changes[0]
+    a = top.analysis
+    tags = []
+    if a and a.nearest_deadline:
+        tags.append(f"срок: {a.nearest_deadline}")
+    if a and a.affected_components:
+        tags.append("затронуто: " + ", ".join(a.affected_components[:3]).lower())
+    prefix = ", ".join(tags)  # самое важное видно в списке писем, не открывая: «срок: 01.09.2026, затронуто: авторизация»
     if len(changes) == 1:
-        return f"[Мониторинг] {changes[0].record.title[:120]}"
-    if changes:
-        names = ", ".join(dict.fromkeys(c.source.name for c in changes))
-        return f"[Мониторинг] Обновлений: {len(changes)} — {names}"[:200]
-    return "[Мониторинг] Сбой: источник недоступен"
+        title = top.record.title[:120]
+        return f"[Мониторинг] {prefix} — {title}" if prefix else f"[Мониторинг] {title}"
+    names = ", ".join(dict.fromkeys(c.source.name for c in changes))
+    return f"[Мониторинг] Обновлений: {len(changes)} — {prefix or names}"[:200]
 
 
-def render(changes: list[Change], alerts: list[str], now: datetime | None = None) -> tuple[str, str, str]:
+def render(
+    changes: list[Change],
+    alerts: list[str],
+    now: datetime | None = None,
+    *,
+    scope: Scope | None = None,
+    filtered: list[Change] | tuple = (),
+) -> tuple[str, str, str]:
     """Возвращает (тема, текстовая версия, HTML-версия)."""
     date = (now or datetime.now()).strftime("%d.%m.%Y")
     header = f"Мониторинг документации — {date}"
     text: list[str] = [header, ""]
     body: list[str] = [f"<h2 style='margin:0 0 4px'>{html.escape(header)}</h2>"]
+    where = {e.name: e.where for e in (scope.glossary if scope else ())}
+    on_topic = bool(scope and scope.interests)
 
     if changes:
         text += [f"Найдено обновлений: {len(changes)}", ""]
@@ -59,22 +77,28 @@ def render(changes: list[Change], alerts: list[str], now: datetime | None = None
         label = KIND_LABEL.get(c.kind, c.kind)
         badge = a.importance if a else "без анализа"
         color = IMPORTANCE_COLOR.get(badge, "#546e7a")
-        text += [f"[{badge.upper()}] {c.record.title} ({label})", f"Источник: {c.source.name}", c.record.url, ""]
+        topic = ""
+        if on_topic and a:
+            topic = "по теме" if a.relevance == "прямо" else "общее изменение"
+        text += [f"[{badge.upper()}] {c.record.title} ({label})", f"Источник: {c.source.name}" + (f" · {topic}" if topic else ""), c.record.url, ""]
         body.append(
             "<div style='border-top:1px solid #ddd;padding:12px 0'>"
             f"<span style='background:{color};color:#fff;padding:2px 8px;border-radius:10px;font-size:12px'>"
             f"{html.escape(badge)}</span> "
-            f"<span style='color:#777;font-size:12px'>{html.escape(label)} · {html.escape(c.source.name)}</span>"
+            f"<span style='color:#777;font-size:12px'>{html.escape(label)} · {html.escape(c.source.name)}"
+            f"{' · ' + html.escape(topic) if topic else ''}</span>"
             f"<h3 style='margin:6px 0'><a href='{html.escape(c.record.url, quote=True)}'>"
             f"{html.escape(c.record.title)}</a></h3>"
         )
         if a:
             text += [f"Кратко: {a.summary}"]
             body.append(f"<p>{html.escape(a.summary)}</p>")
+            to_change = [f"{n} → {where[n]}" if where.get(n) else n for n in a.affected_components]
             for title, items in (
                 ("Что изменилось", a.key_changes),
                 ("Сроки", a.deadlines),
                 ("Что сделать", a.required_actions),
+                ("Что менять в системе", to_change),
             ):
                 if items:
                     text += [f"{title}:"] + [f" - {i}" for i in items]
@@ -83,12 +107,14 @@ def render(changes: list[Change], alerts: list[str], now: datetime | None = None
                         + "".join(f"<li>{html.escape(i)}</li>" for i in items)
                         + "</ul>"
                     )
-            text += [f"Кого касается: {a.who_is_affected}", f"Почему {a.importance}: {a.importance_reason}"]
-            body.append(
-                f"<p><b>Кого касается:</b> {html.escape(a.who_is_affected)}<br>"
-                f"<span style='color:#777'>Почему «{html.escape(a.importance)}»: "
-                f"{html.escape(a.importance_reason)}</span></p>"
-            )
+            if on_topic and a.relevance_note:
+                text.append(f"Отбор по теме: {a.relevance_note}")
+                body.append(f"<p style='color:#777;margin:4px 0'>Отбор по теме: {html.escape(a.relevance_note)}</p>")
+            text.append(f"Кого касается: {a.who_is_affected}")
+            reason = f"<br><span style='color:#777'>Почему «{html.escape(a.importance)}»: {html.escape(a.importance_reason)}</span>" if a.importance_reason else ""
+            if a.importance_reason:
+                text.append(f"Почему {a.importance}: {a.importance_reason}")
+            body.append(f"<p><b>Кого касается:</b> {html.escape(a.who_is_affected)}{reason}</p>")
         else:
             excerpt = _fallback_excerpt(c)
             text += ["Автоматический анализ недоступен. Фрагмент:", excerpt]
@@ -102,6 +128,19 @@ def render(changes: list[Change], alerts: list[str], now: datetime | None = None
             body.append(f"<p style='color:#c62828'>{note}</p>")
         text.append("")
         body.append("</div>")
+
+    if filtered:
+        # Отфильтрованное не пропадает бесследно: если агент ошибся, это видно и можно поправить тему в конфиге.
+        shown = list(filtered)[:10]
+        lines = [c.record.title + (f" ({c.analysis.relevance_note})" if c.analysis and c.analysis.relevance_note else "") for c in shown]
+        more = f" и ещё {len(filtered) - len(shown)}" if len(filtered) > len(shown) else ""
+        text += [f"Не вошло в письмо как не относящееся к теме: {len(filtered)}{more}"] + [f" - {line}" for line in lines] + [""]
+        body.append(
+            "<div style='border-top:1px solid #ddd;padding:12px 0;color:#777;font-size:13px'>"
+            f"Не вошло в письмо как не относящееся к теме: {len(filtered)}{html.escape(more)}<ul>"
+            + "".join(f"<li>{html.escape(line)}</li>" for line in lines)
+            + "</ul></div>"
+        )
 
     if alerts:
         text += ["Сбои мониторинга:"] + [f" - {m}" for m in alerts] + [""]
