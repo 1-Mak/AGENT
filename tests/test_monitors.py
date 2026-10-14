@@ -113,7 +113,8 @@ def test_pdf_origin_is_shown_in_the_letter():
     change.analysis = make_analysis()
     change.found_on = "https://example.com/page/"
     _, text, html_body = render([change], [])
-    assert "файл со страницы https://example.com/page/" in text and "файл со страницы https://example.com/page/" in html_body
+    assert "Файл найден на странице: https://example.com/page/" in text
+    assert "файл найден на странице <a href='https://example.com/page/'>" in html_body
 
 
 # --- сигналы в письме ---

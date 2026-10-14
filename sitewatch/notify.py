@@ -12,13 +12,14 @@ from email.utils import formatdate, make_msgid
 from typing import Sequence
 
 from .config import Settings
-from .models import Change, Scope
+from .models import Change, Place, Scope
 from .signals import Signal, sort_signals
 
 KIND_LABEL = {"new": "новый документ", "updated": "документ обновлён"}
 IMPORTANCE_ORDER = {"высокая": 0, "средняя": 1, "низкая": 2}
 IMPORTANCE_COLOR = {"высокая": "#c62828", "средняя": "#ef6c00", "низкая": "#546e7a"}
 LEVEL_COLOR = {"высокая": "#c62828", "средняя": "#ef6c00", "низкая": "#546e7a"}
+QUOTE_SHOWN_CHARS = 200
 EXCERPT_CHARS = 1200
 EXCERPT_DIFF_LINES = 60
 FILTERED_SHOWN = 5
@@ -117,6 +118,38 @@ def _rows(change: Change, where: dict[str, str]) -> list[tuple[str, list[str]]]:
     ]
 
 
+def _short(text: str, limit: int = QUOTE_SHOWN_CHARS) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _places(change: Change) -> list[Place]:
+    """Места в документе: только те, чья цитата подтверждена по тексту (остальные отбрасывает locate.ground_places)."""
+    a = change.analysis
+    return [p for p in (a.places if a else []) if p.verified]
+
+
+def _place_text(place: Place) -> str:
+    head = " — ".join(x for x in (place.section, f"«{_short(place.quote)}»") if x)
+    line = head + (f" → {place.change}" if head and place.change else (f"→ {place.change}" if place.change else ""))
+    return line + (f" (стр. {place.page})" if place.page else "")
+
+
+def _place_html(place: Place, doc_url: str) -> str:
+    parts = []
+    if place.section:
+        parts.append(f"<b>{html.escape(place.section)}</b>")
+    parts.append(f"«{html.escape(_short(place.quote))}»")
+    line = " — ".join(parts)
+    if place.change:
+        line += (" → " if line else "→ ") + html.escape(place.change)
+    if place.page:
+        line += f" (стр. {place.page})"
+    if place.url != doc_url:  # у страницы-цитаты и PDF есть ссылка, ведущая прямо к месту
+        line += f" · <a href='{html.escape(place.url, quote=True)}'>открыть место</a>"
+    return line
+
+
 def render(
     changes: list[Change],
     alerts: list[str],
@@ -159,9 +192,7 @@ def render(
         color = IMPORTANCE_COLOR.get(badge, "#546e7a")
         general = " · общее изменение" if on_topic and a and a.relevance == "общее" else ""
         origin = f"{c.source.name}{general}"
-        if c.found_on:
-            origin += f" · файл со страницы {c.found_on}"
-        text += [f"[{badge.upper()}] {c.record.title} ({label})", f"Источник: {origin}"]
+        text += [f"[{badge.upper()}] {c.record.title} ({label})"]
         body.append(
             "<div style='border-top:1px solid #ddd;padding:10px 0'>"
             f"<span style='background:{color};color:#fff;padding:2px 8px;border-radius:10px;font-size:12px'>"
@@ -192,6 +223,19 @@ def render(
                     f"<tr><td style='vertical-align:top;padding:2px 12px 2px 0;color:#555;white-space:nowrap'><b>{name}</b></td>"
                     f"<td style='padding:2px 0;{style}'>{cell}</td></tr>"
                 )
+            places = _places(c)
+            if places:
+                text.append("  В документе:")
+                for place in places:
+                    text.append(f"    - {_place_text(place)}")
+                    if place.url != c.record.url:
+                        text.append(f"      {place.url}")
+                html_rows.append(
+                    "<tr><td style='vertical-align:top;padding:2px 12px 2px 0;color:#555;white-space:nowrap'><b>В документе</b></td>"
+                    "<td style='padding:2px 0'><ul style='margin:0;padding-left:18px'>"
+                    + "".join(f"<li>{_place_html(p, c.record.url)}</li>" for p in places)
+                    + "</ul></td></tr>"
+                )
             body.append("<table style='border-collapse:collapse'>" + "".join(html_rows) + "</table>")
         else:
             excerpt = _fallback_excerpt(c)
@@ -204,7 +248,20 @@ def render(
             note = "Текст документа очень длинный и был передан анализу не целиком."
             text.append(note)
             body.append(f"<p style='color:#c62828'>{note}</p>")
-        text += [c.record.url, ""]
+        text.append(f"  Источник: {origin}")
+        text.append(f"  Ссылка:   {c.record.url}")
+        if c.found_on:
+            text.append(f"  Файл найден на странице: {c.found_on}")
+        text.append("")
+        found = (
+            f" · файл найден на странице <a href='{html.escape(c.found_on, quote=True)}'>{html.escape(c.found_on)}</a>"
+            if c.found_on
+            else ""
+        )
+        body.append(
+            "<p style='margin:8px 0 0;font-size:12px;color:#555'>"
+            f"Источник: {html.escape(origin)} · <a href='{html.escape(c.record.url, quote=True)}'>ссылка на документ</a>{found}</p>"
+        )
         body.append("</div>")
 
     if filtered:

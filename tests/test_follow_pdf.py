@@ -169,7 +169,7 @@ def test_letter_and_agent_prompt_say_where_the_pdf_was_found():
     )
     assert [c.record.url for c in report.changes] == [ITEM_1, PDF_A]
     _, text, _ = mailbox.sent[0]
-    assert f"файл со страницы {ITEM_1}" in text
+    assert f"Файл найден на странице: {ITEM_1}" in text
 
     change = Change(docs_source(), DocRecord(PDF_A, "docs", "Руководство", "h", "Текст"), "new", found_on=ITEM_1)
     prompt, _ = build_prompt(change, 10_000)

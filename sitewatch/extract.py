@@ -186,7 +186,13 @@ def _is_page_number(line: str, page_index: int) -> bool:
 
 
 def extract_pdf(data: bytes, url: str, ignore_regex: tuple[str, ...] = ()) -> tuple[str, str]:
-    """Возвращает (заголовок, текст PDF).
+    """Возвращает (заголовок, текст PDF). Подробности и номера страниц строк — в extract_pdf_pages."""
+    title, text, _ = extract_pdf_pages(data, url, ignore_regex)
+    return title, text
+
+
+def extract_pdf_pages(data: bytes, url: str, ignore_regex: tuple[str, ...] = ()) -> tuple[str, str, tuple[int, ...]]:
+    """Возвращает (заголовок, текст PDF, номер страницы для каждой строки текста; 0 — служебная строка).
 
     Из текста убирается то, что меняется без изменения смысла и даёт ложные срабатывания:
     номера страниц и колонтитулы, повторяющиеся на большинстве страниц.
@@ -234,7 +240,9 @@ def extract_pdf(data: bytes, url: str, ignore_regex: tuple[str, ...] = ()) -> tu
         pages = [[line for line in lines if line not in repeated] for lines in pages]
 
     ignore = [re.compile(rx) for rx in ignore_regex]
-    lines = [line for page in pages for line in page if not any(rx.search(line) for rx in ignore)]
+    numbered = [(number, line) for number, page in enumerate(pages, 1) for line in page if not any(rx.search(line) for rx in ignore)]
+    lines = [line for _, line in numbered]
+    line_pages = [number for number, _ in numbered]
     if not lines:
         raise ExtractError("в PDF нет текста — похоже на скан без текстового слоя (распознавание изображений не поддерживается)")
 
@@ -242,8 +250,9 @@ def extract_pdf(data: bytes, url: str, ignore_regex: tuple[str, ...] = ()) -> tu
     kept_repeated = sorted(line for line in repeated if not any(rx.search(line) for rx in ignore))
     if kept_repeated:
         lines.append("[Колонтитулы: " + " | ".join(kept_repeated) + "]")
+        line_pages.append(0)
     log.info("  PDF: страниц %d, строк %d, разбор занял %.1f с", len(reader.pages), len(lines), time.monotonic() - started)
-    return title, "\n".join(lines)
+    return title, "\n".join(lines), tuple(line_pages)
 
 
 # --- локальные файлы (file://) ---

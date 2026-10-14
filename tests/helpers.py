@@ -91,7 +91,7 @@ def make_change(text="Текст документа", kind="new", diff="", title
 class FakeAnalyzer:
     def __init__(self, importance: str = "средняя", disabled_reason: str | None = None, relevance: str = "прямо",
                  relevance_by_title: dict[str, str] | None = None, components: tuple[str, ...] = (), deadline: str = "",
-                 methods: tuple[str, ...] = ()):
+                 methods: tuple[str, ...] = (), places: list | None = None):
         self.importance = importance
         self.disabled_reason = disabled_reason
         self.relevance = relevance
@@ -99,6 +99,7 @@ class FakeAnalyzer:
         self.components = components
         self.deadline = deadline
         self.methods = methods
+        self.places = places or []
         self.seen: list[str] = []
 
     def analyze(self, change):
@@ -107,6 +108,7 @@ class FakeAnalyzer:
         return Analysis(
             summary=f"Разбор: {change.record.title}",
             affected_methods=list(self.methods),
+            places=[p.model_copy() if hasattr(p, "model_copy") else p for p in self.places],
             deadlines=[],
             required_actions=[],
             importance=self.importance,

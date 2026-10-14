@@ -18,8 +18,8 @@ from .extract import (
     ExtractError,
     extract_document,
     extract_links,
-    extract_pdf,
     extract_pdf_links,
+    extract_pdf_pages,
     extract_text_file,
     is_file_url,
     is_pdf_url,
@@ -28,6 +28,7 @@ from .extract import (
     parse_telegram,
 )
 from .fetch import FetchError
+from .locate import ground_places
 from .models import Change, DocRecord, Scope, Source
 from .notify import render, sort_key
 from .robots import GuardedFetcher, RobotsBlocked, RobotsPolicy
@@ -119,9 +120,10 @@ def fetch_record(
     """Скачивает документ и приводит его к тексту: PDF — через разбор файла, text — как есть, остальное — как HTML.
     Адреса file:// читаются с диска (удобно для собственной копии спецификации).
     as_pdf — читать как PDF, даже если в адресе нет .pdf. pdf_links — сюда добавляются ссылки на PDF со страницы."""
+    line_pages = None
     try:
         if as_pdf or source.type == "pdf" or is_pdf_url(url):
-            title, text = extract_pdf(_read_bytes(fetcher, url), url, source.ignore_regex)
+            title, text, line_pages = extract_pdf_pages(_read_bytes(fetcher, url), url, source.ignore_regex)
         elif source.type == "text":
             title, text = extract_text_file(_read_text(fetcher, url), url)
         else:
@@ -138,7 +140,7 @@ def fetch_record(
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     log.info("  извлечено: «%s», %d символов", title, len(text))
     log.debug("  хэш текста: %s", digest[:12])
-    return DocRecord(url, source.id, title, digest, text)
+    return DocRecord(url, source.id, title, digest, text, line_pages)
 
 
 def make_diff(old: str, new: str) -> str:
@@ -339,7 +341,10 @@ def run(
         log.info("Агент разбирает: «%s» (%s)", change.record.title, "новый" if change.kind == "new" else "изменён")
         change.analysis = analyzer.analyze(change)
         if change.analysis:
-            log.info("  разбор готов, важность: %s", change.analysis.importance)
+            ground_places(change)  # проверить цитаты агента по тексту и построить ссылки на места
+            checked = sum(p.verified for p in change.analysis.places)
+            log.info("  разбор готов, важность: %s, мест в документе: %d (цитата подтверждена у %d)",
+                     change.analysis.importance, len(change.analysis.places), checked)
         else:
             log.info("  разбора нет — в письме будет фрагмент текста")
 

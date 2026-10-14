@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+
+class Place(BaseModel):
+    """Конкретное место в документе: где оно (раздел), дословная цитата и что там менять.
+
+    Поля url, page и verified заполняет программа (проверяет цитату по тексту документа и строит ссылку), не модель."""
+
+    section: str = Field(default="", description="Раздел, пункт или заголовок документа, где это написано, как он назван в документе.")
+    quote: str = Field(default="", description="Дословная цитата из документа: одно предложение или строка, не длиннее 200 символов.")
+    change: str = Field(default="", description="Что именно нужно изменить из-за этого места, одной строкой.")
+    url: str = ""  # ссылка на это место (адрес документа с якорем или номером страницы PDF)
+    page: int | None = None  # страница PDF, если известна
+    verified: bool = False  # цитата найдена в тексте документа дословно
+
+    @field_validator("section", "quote", "change", mode="before")
+    @classmethod
+    def _text(cls, value):
+        return "" if value is None else str(value).strip()
 
 
 class Analysis(BaseModel):
@@ -39,6 +57,10 @@ class Analysis(BaseModel):
     affected_components: list[str] = Field(
         default_factory=list, description="Названия записей из таблицы соответствий, которых касается изменение."
     )
+    places: list[Place] = Field(
+        default_factory=list,
+        description="До трёх конкретных мест документа, где сказано, что и где менять: раздел, дословная цитата, что менять.",
+    )
 
     @field_validator("relevance", mode="before")
     @classmethod
@@ -63,6 +85,24 @@ class Analysis(BaseModel):
         if isinstance(value, str):
             return [value] if value.strip() else []
         return value
+
+    @field_validator("places", mode="before")
+    @classmethod
+    def _places(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, (str, dict)):
+            value = [value]
+        places = []
+        for item in value:
+            if isinstance(item, str):
+                item = {"quote": item}  # модель прислала просто строку: считаем её цитатой, проверка решит, настоящая ли она
+            if not isinstance(item, (dict, Place)):
+                continue  # null, число и прочий мусор внутри списка не должны губить весь разбор
+            if isinstance(item, dict) and not any(str(item.get(k) or "").strip() for k in ("section", "quote", "change")):
+                continue
+            places.append(item)
+        return places
 
     @field_validator("importance", mode="before")
     @classmethod
@@ -117,6 +157,8 @@ class DocRecord:
     title: str
     content_hash: str  # пустая строка = URL известен, но текст ещё не сохранён
     text: str
+    # для PDF: номер страницы каждой строки text (в базе не хранится, нужен только чтобы дать ссылку на страницу)
+    line_pages: tuple[int, ...] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass
